@@ -1,2 +1,22 @@
-/// 触发一次方向事件所需的光标位移（屏幕像素）
-pub const 方向阈值: i32 = 100;
+#[derive(Debug, Clone, Copy)]
+pub struct 方向阈值 {
+    pub 基础: i32,
+    pub 水平倍率: f64,
+}
+
+impl 方向阈值 {
+    pub const 默认: Self = Self {
+        基础: 100,
+        水平倍率: 2.0,
+    };
+
+    pub const fn 垂直(&self) -> i32 {
+        self.基础
+    }
+
+    pub fn 水平(&self) -> i32 {
+        (self.基础 as f64 * self.水平倍率).round() as i32
+    }
+}
+
+pub const 阈值: 方向阈值 = 方向阈值::默认;
