@@ -7,6 +7,8 @@ pub enum 原始鼠标事件 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum 方向 {
+    开始,
+    结束,
     上,
     下,
     左,

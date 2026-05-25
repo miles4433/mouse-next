@@ -42,6 +42,7 @@ impl 监测器 {
                     上次_y: y,
                     已触发手势: false,
                 };
+                let _ = self.方向发送端.send(方向::开始);
             }
             原始鼠标事件::鼠标移动 { x, y } => {
                 let 新方向 = if let 状态::记录中 {
@@ -78,6 +79,7 @@ impl 监测器 {
                     补发右键单击();
                 }
                 self.状态 = 状态::空闲;
+                let _ = self.方向发送端.send(方向::结束);
             }
         }
     }
@@ -155,6 +157,7 @@ mod tests {
         监测器.处理(原始鼠标事件::右键按下 { x: 0, y: 0 });
         监测器.处理(原始鼠标事件::鼠标移动 { x: 100, y: 0 });
 
+        assert_eq!(接收端.try_recv().unwrap(), 方向::开始);
         assert_eq!(接收端.try_recv().unwrap(), 方向::右);
         assert!(接收端.try_recv().is_err());
     }
@@ -167,6 +170,8 @@ mod tests {
         监测器.处理(原始鼠标事件::右键按下 { x: 0, y: 0 });
         监测器.处理(原始鼠标事件::右键抬起 { x: 0, y: 0 });
 
+        assert_eq!(接收端.try_recv().unwrap(), 方向::开始);
+        assert_eq!(接收端.try_recv().unwrap(), 方向::结束);
         assert!(接收端.try_recv().is_err());
     }
 
@@ -179,6 +184,7 @@ mod tests {
         监测器.处理(原始鼠标事件::鼠标移动 { x: 80, y: 0 });
         监测器.处理(原始鼠标事件::鼠标移动 { x: 0, y: 0 });
 
+        assert_eq!(接收端.try_recv().unwrap(), 方向::开始);
         assert!(接收端.try_recv().is_err());
     }
 
@@ -191,6 +197,7 @@ mod tests {
         // 斜向移动同时积累 x、y，触发一次后两者应清零
         监测器.处理(原始鼠标事件::鼠标移动 { x: 100, y: 100 });
 
+        assert_eq!(接收端.try_recv().unwrap(), 方向::开始);
         assert_eq!(接收端.try_recv().unwrap(), 方向::右);
         assert!(接收端.try_recv().is_err());
 

@@ -40,6 +40,8 @@ fn main() {
 
 fn 打印方向(方向: 方向) {
     match 方向 {
+        方向::开始 => println!("\x1b[35m● 开始\x1b[0m"),
+        方向::结束 => println!("\x1b[90m● 结束\x1b[0m"),
         方向::上 => println!("\x1b[36m↑ 上\x1b[0m"),
         方向::下 => println!("\x1b[33m↓ 下\x1b[0m"),
         方向::左 => println!("\x1b[32m← 左\x1b[0m"),
