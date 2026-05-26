@@ -22,12 +22,16 @@ fn 执行动作(按键序列: 待执行动作) {
 
     let 输入: Vec<INPUT> = 按键序列
         .into_iter()
-        .map(|操作| {
+        .filter_map(|操作| {
             let (虚拟键, 抬起) = match 操作 {
                 虚拟键操作::按下(键) => (键, false),
                 虚拟键操作::抬起(键) => (键, true),
+                虚拟键操作::打印(文字) => {
+                    println!("{文字}");
+                    return None;
+                }
             };
-            INPUT {
+            Some(INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
                     ki: KEYBDINPUT {
@@ -40,9 +44,13 @@ fn 执行动作(按键序列: 待执行动作) {
                         ..Default::default()
                     },
                 },
-            }
+            })
         })
         .collect();
+
+    if 输入.is_empty() {
+        return;
+    }
 
     unsafe {
         SendInput(&输入, std::mem::size_of::<INPUT>() as i32);

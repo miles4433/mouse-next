@@ -8,19 +8,25 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, PeekMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION, HHOOK,
-    LLMHF_INJECTED, MSG, PM_REMOVE, WH_MOUSE_LL, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_QUIT,
+    LLMHF_INJECTED, MSG, PM_REMOVE, WH_MOUSE_LL, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP,
 };
 
 use super::types::原始鼠标事件;
 
 thread_local! {
-    static 原始事件发送端: RefCell<Option<Sender<原始鼠标事件>>> = const { RefCell::new(None) };
+    static 原始事件发送端: RefCell<Vec<Sender<原始鼠标事件>>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn 启动_hook(发送端: Sender<原始鼠标事件>, 停止: Arc<AtomicBool>) {
+pub fn 启动_hook(
+    处理器发送端: Sender<原始鼠标事件>,
+    overlay发送端: Sender<原始鼠标事件>,
+    停止: Arc<AtomicBool>,
+) {
     thread::spawn(move || {
-        原始事件发送端.with(|槽| *槽.borrow_mut() = Some(发送端));
+        原始事件发送端.with(|槽| {
+            *槽.borrow_mut() = vec![处理器发送端, overlay发送端];
+        });
 
         let hook = unsafe { 安装_hook() };
         let hook = match hook {
@@ -82,7 +88,7 @@ unsafe extern "system" fn 鼠标_hook回调(
 
     if let Some(事件) = 事件 {
         原始事件发送端.with(|槽| {
-            if let Some(发送端) = 槽.borrow().as_ref() {
+            for 发送端 in 槽.borrow().iter() {
                 let _ = 发送端.send(事件);
             }
         });

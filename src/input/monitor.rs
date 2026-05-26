@@ -1,8 +1,7 @@
 use std::sync::mpsc::Sender;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEINPUT,
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
 };
 
 use crate::config::阈值;
@@ -22,14 +21,19 @@ enum 状态 {
 
 pub struct 监测器 {
     状态: 状态,
-    方向发送端: Sender<方向>,
+    方向发送端列表: Vec<Sender<方向>>,
 }
 
 impl 监测器 {
+    #[cfg(test)]
     pub fn 新建(方向发送端: Sender<方向>) -> Self {
+        Self::新建多个(vec![方向发送端])
+    }
+
+    pub fn 新建多个(方向发送端列表: Vec<Sender<方向>>) -> Self {
         Self {
             状态: 状态::空闲,
-            方向发送端,
+            方向发送端列表,
         }
     }
 
@@ -44,7 +48,7 @@ impl 监测器 {
                     已触发手势: false,
                     有移动: false,
                 };
-                let _ = self.方向发送端.send(方向::开始);
+                self.发送方向(方向::开始);
             }
             原始鼠标事件::鼠标移动 { x, y } => {
                 let 新方向 = if let 状态::记录中 {
@@ -68,23 +72,28 @@ impl 监测器 {
                     Vec::new()
                 };
                 for 方向 in 新方向 {
-                    let _ = self.方向发送端.send(方向);
+                    self.发送方向(方向);
                 }
             }
             原始鼠标事件::右键抬起 { .. } => {
                 let 需要补发 = matches!(
                     self.状态,
                     状态::记录中 {
-                        有移动: false,
-                        ..
+                        有移动: false, ..
                     }
                 );
                 if 需要补发 {
                     补发右键单击();
                 }
                 self.状态 = 状态::空闲;
-                let _ = self.方向发送端.send(方向::结束);
+                self.发送方向(方向::结束);
             }
+        }
+    }
+
+    fn 发送方向(&self, 方向: 方向) {
+        for 发送端 in &self.方向发送端列表 {
+            let _ = 发送端.send(方向);
         }
     }
 
@@ -99,7 +108,9 @@ impl 监测器 {
         }
     }
 
-    fn 收集方向(累积_x: &mut i32, 累积_y: &mut i32, 已触发手势: &mut bool) -> Vec<方向> {
+    fn 收集方向(
+        累积_x: &mut i32, 累积_y: &mut i32, 已触发手势: &mut bool
+    ) -> Vec<方向> {
         let mut 结果 = Vec::new();
         // 垂直优先，且各轴触发时只清零本轴，保留另一轴积累以支持 下右/上右 等多步轨迹
         while *累积_y >= 阈值.垂直() {
@@ -165,7 +176,10 @@ mod tests {
         let mut 监测器 = 监测器::新建(发送端);
 
         监测器.处理(原始鼠标事件::右键按下 { x: 0, y: 0 });
-        监测器.处理(原始鼠标事件::鼠标移动 { x: 阈值.水平(), y: 0 });
+        监测器.处理(原始鼠标事件::鼠标移动 {
+            x: 阈值.水平(),
+            y: 0,
+        });
 
         assert_eq!(接收端.try_recv().unwrap(), 方向::开始);
         assert_eq!(接收端.try_recv().unwrap(), 方向::右);
@@ -197,10 +211,7 @@ mod tests {
         assert_eq!(接收端.try_recv().unwrap(), 方向::开始);
         assert_eq!(接收端.try_recv().unwrap(), 方向::结束);
         assert!(接收端.try_recv().is_err());
-        assert!(matches!(
-            监测器.状态,
-            状态::空闲
-        ));
+        assert!(matches!(监测器.状态, 状态::空闲));
     }
 
     #[test]
@@ -216,7 +227,10 @@ mod tests {
         assert!(接收端.try_recv().is_err());
 
         // 反向滑过阈值应触发，而非被抵消
-        监测器.处理(原始鼠标事件::鼠标移动 { x: -阈值.水平(), y: 0 });
+        监测器.处理(原始鼠标事件::鼠标移动 {
+            x: -阈值.水平(),
+            y: 0,
+        });
         assert_eq!(接收端.try_recv().unwrap(), 方向::左);
     }
 
@@ -227,7 +241,10 @@ mod tests {
 
         监测器.处理(原始鼠标事件::右键按下 { x: 0, y: 0 });
         监测器.处理(原始鼠标事件::鼠标移动 { x: 80, y: 0 });
-        监测器.处理(原始鼠标事件::鼠标移动 { x: 80, y: 阈值.垂直() });
+        监测器.处理(原始鼠标事件::鼠标移动 {
+            x: 80,
+            y: 阈值.垂直(),
+        });
 
         assert_eq!(接收端.try_recv().unwrap(), 方向::开始);
         assert_eq!(接收端.try_recv().unwrap(), 方向::下);
@@ -257,7 +274,10 @@ mod tests {
         let mut 监测器 = 监测器::新建(发送端);
 
         监测器.处理(原始鼠标事件::右键按下 { x: 0, y: 0 });
-        监测器.处理(原始鼠标事件::鼠标移动 { x: 0, y: 阈值.垂直() });
+        监测器.处理(原始鼠标事件::鼠标移动 {
+            x: 0,
+            y: 阈值.垂直(),
+        });
         监测器.处理(原始鼠标事件::鼠标移动 {
             x: 阈值.水平(),
             y: 阈值.垂直(),

@@ -1,4 +1,4 @@
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT, VK_TAB, VK_T, VK_W};
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT, VK_T, VK_TAB, VK_W};
 
 use crate::action::types::{动作, 动作类型, 虚拟键操作};
 use crate::input::方向;

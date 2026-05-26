@@ -55,9 +55,10 @@ impl 匹配器 {
                 break;
             }
 
-            let 队首是有效起点 = self.动作列表.iter().any(|动作| {
-                动作.轨迹.first() == self.轨迹队列.first()
-            });
+            let 队首是有效起点 = self
+                .动作列表
+                .iter()
+                .any(|动作| 动作.轨迹.first() == self.轨迹队列.first());
             if !队首是有效起点 {
                 self.轨迹队列.remove(0);
                 continue;
@@ -99,7 +100,9 @@ fn 队列以前缀匹配(队列: &[方向], 前缀: &[方向]) -> bool {
     队列.len() >= 前缀.len() && 队列[..前缀.len()] == *前缀
 }
 
-pub fn 启动匹配器(方向接收端: Receiver<方向>, 执行发送端: Sender<待执行动作>) {
+pub fn 启动匹配器(
+    方向接收端: Receiver<方向>, 执行发送端: Sender<待执行动作>
+) {
     thread::spawn(move || {
         let mut 匹配器 = 匹配器::新建(执行发送端);
         while let Ok(事件) = 方向接收端.recv() {
@@ -111,7 +114,7 @@ pub fn 启动匹配器(方向接收端: Receiver<方向>, 执行发送端: Sende
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT, VK_TAB, VK_T, VK_W};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT, VK_T, VK_TAB, VK_W};
 
     use crate::action::types::虚拟键操作;
 
