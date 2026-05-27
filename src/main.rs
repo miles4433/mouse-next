@@ -15,18 +15,16 @@ fn main() {
     let (原始事件发送端, 原始事件接收端) = mpsc::channel();
     let (overlay原始事件发送端, overlay原始事件接收端) = mpsc::channel();
     let (方向发送端, 方向接收端) = mpsc::channel();
-    let (overlay方向发送端, overlay方向接收端) = mpsc::channel();
     let (执行发送端, 执行接收端) = mpsc::channel();
     let 停止 = Arc::new(AtomicBool::new(false));
     let overlay状态 = Overlay状态::新建共享();
     let overlay重绘 = 新建重绘信号();
 
-    启动处理器(原始事件接收端, 方向发送端, overlay方向发送端);
+    启动处理器(原始事件接收端);
     启动匹配器(方向接收端, 执行发送端.clone());
     启动_overlay输入(
         overlay原始事件接收端,
-        overlay方向接收端,
-        执行发送端,
+        方向发送端,
         overlay状态.clone(),
         overlay重绘.clone(),
     );

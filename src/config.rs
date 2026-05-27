@@ -20,3 +20,6 @@ impl 方向阈值 {
 }
 
 pub const 阈值: 方向阈值 = 方向阈值::默认;
+
+/// 是否在 overlay 中绘制鼠标移动轨迹
+pub const 显示鼠标轨迹: bool = false;
