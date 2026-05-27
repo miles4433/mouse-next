@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect,
@@ -12,23 +11,31 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW,
+    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
-use super::state::Overlay共享状态;
+use super::repaint::{Overlay重绘信号, 注册重绘上下文};
+use super::state::{Overlay共享状态, 隐藏窗口位置, 隐藏窗口大小};
 
-const 初始窗口大小: egui::Vec2 = egui::vec2(520.0, 320.0);
+const 默认显示大小: egui::Vec2 = egui::vec2(520.0, 320.0);
 
 #[derive(Clone, Copy, PartialEq)]
-struct 最大化范围 {
+struct 窗口范围 {
     原点: Pos2,
     大小: Vec2,
 }
 
-pub fn 运行_overlay窗口(状态: Overlay共享状态) {
-    let 初始范围 = 获取最大化范围(当前鼠标位置());
+fn 隐藏范围() -> 窗口范围 {
+    窗口范围 {
+        原点: 隐藏窗口位置,
+        大小: 隐藏窗口大小,
+    }
+}
+
+pub fn 运行_overlay窗口(状态: Overlay共享状态, 重绘信号: Overlay重绘信号) {
+    let 初始范围 = 隐藏范围();
     let 选项 = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("mouse-next overlay")
@@ -50,6 +57,7 @@ pub fn 运行_overlay窗口(状态: Overlay共享状态) {
             设置字体(&创建上下文.egui_ctx);
             Ok(Box::new(OverlayApp {
                 状态,
+                重绘信号,
                 当前范围: Some(初始范围),
                 hwnd,
             }))
@@ -61,7 +69,8 @@ pub fn 运行_overlay窗口(状态: Overlay共享状态) {
 
 struct OverlayApp {
     状态: Overlay共享状态,
-    当前范围: Option<最大化范围>,
+    重绘信号: Overlay重绘信号,
+    当前范围: Option<窗口范围>,
     hwnd: Option<HWND>,
 }
 
@@ -71,34 +80,40 @@ impl eframe::App for OverlayApp {
     }
 
     fn update(&mut self, 上下文: &egui::Context, _frame: &mut eframe::Frame) {
+        注册重绘上下文(&self.重绘信号, 上下文);
+
         if 上下文.input(|输入| 输入.key_pressed(egui::Key::Escape)) {
             上下文.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
         let Ok(mut 状态) = self.状态.lock() else {
-            上下文.request_repaint_after(Duration::from_millis(16));
             return;
         };
 
         if 状态.需要重定位 {
-            if 状态.显示 {
-                let 最大化范围 = 状态.锚点.map(获取最大化范围).unwrap_or(最大化范围 {
-                    原点: pos2(0.0, 0.0),
-                    大小: 初始窗口大小,
-                });
-
-                if self.当前范围 != Some(最大化范围) {
-                    上下文.send_viewport_cmd(egui::ViewportCommand::InnerSize(最大化范围.大小));
-                    上下文.send_viewport_cmd(egui::ViewportCommand::OuterPosition(最大化范围.原点));
-                    if let Some(hwnd) = self.hwnd {
-                        刷新窗口不激活(hwnd);
-                    }
-                    self.当前范围 = Some(最大化范围);
-                }
-                状态.窗口原点 = 最大化范围.原点;
+            let 目标范围 = if 状态.显示 {
+                let 范围 = 状态
+                    .锚点
+                    .map(获取显示范围)
+                    .unwrap_or(窗口范围 {
+                        原点: pos2(0.0, 0.0),
+                        大小: 默认显示大小,
+                    });
+                状态.窗口原点 = 范围.原点;
+                范围
             } else {
-                // 窗口常驻透明置顶，只隐藏内部内容，避免 Show/Hide 干扰焦点。
+                隐藏范围()
+            };
+
+            if self.当前范围 != Some(目标范围) {
+                if let Some(hwnd) = self.hwnd {
+                    同步窗口范围(hwnd, 目标范围);
+                }
+                上下文.send_viewport_cmd(egui::ViewportCommand::InnerSize(目标范围.大小));
+                上下文.send_viewport_cmd(egui::ViewportCommand::OuterPosition(目标范围.原点));
+                self.当前范围 = Some(目标范围);
+                上下文.request_repaint();
             }
             状态.需要重定位 = false;
         }
@@ -111,73 +126,73 @@ impl eframe::App for OverlayApp {
         let 提示文字 = 状态.提示文字.clone();
         drop(状态);
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
-            .show(上下文, |ui| {
-                let 画笔 = ui.painter();
-                画笔.rect_filled(
-                    ui.max_rect(),
-                    0.0,
-                    if 显示 {
-                        Color32::from_rgba_unmultiplied(255, 120, 120, 52)
-                    } else {
-                        Color32::from_rgba_unmultiplied(180, 180, 180, 36)
-                    },
-                );
-                if !显示 {
-                    return;
-                }
-                let 偏移 = 窗口原点.to_vec2();
-                let 局部轨迹点: Vec<Pos2> = 轨迹点.iter().map(|点| *点 - 偏移).collect();
-
-                if 局部轨迹点.len() >= 2 {
-                    画笔.add(egui::Shape::line(
-                        局部轨迹点.clone(),
-                        Stroke::new(3.0, Color32::from_white_alpha(190)),
-                    ));
-                }
-
-                for (索引, 按钮) in 按钮列表.iter().enumerate() {
-                    let 局部矩形 = Rect::from_min_max(按钮.矩形.min - 偏移, 按钮.矩形.max - 偏移);
-                    let 已选中 = Some(索引) == 选中按钮;
-                    let 填充 = if 已选中 {
-                        Color32::from_rgba_unmultiplied(80, 150, 255, 180)
-                    } else {
-                        Color32::from_rgba_unmultiplied(30, 30, 30, 150)
-                    };
-                    let 边框 = if 已选中 {
-                        Color32::from_rgb(180, 220, 255)
-                    } else {
-                        Color32::from_white_alpha(120)
-                    };
-                    画笔.rect_filled(局部矩形, 8.0, 填充);
-                    画笔.rect_stroke(局部矩形, 8.0, Stroke::new(1.0, 边框), StrokeKind::Outside);
-                    画笔.text(
-                        局部矩形.center(),
-                        Align2::CENTER_CENTER,
-                        按钮.标题,
-                        FontId::proportional(16.0),
-                        Color32::WHITE,
+        if 显示 {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(上下文, |ui| {
+                    let 画笔 = ui.painter();
+                    画笔.rect_filled(
+                        ui.max_rect(),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(255, 120, 120, 52),
                     );
-                }
 
-                if !提示文字.is_empty() {
-                    let 位置 = 局部轨迹点
-                        .last()
-                        .copied()
-                        .unwrap_or(pos2(初始窗口大小.x / 2.0, 初始窗口大小.y / 2.0))
-                        + vec2(18.0, -18.0);
-                    画笔.text(
-                        位置,
-                        Align2::LEFT_CENTER,
-                        提示文字,
-                        FontId::proportional(24.0),
-                        Color32::WHITE,
-                    );
-                }
-            });
+                    let 偏移 = 窗口原点.to_vec2();
+                    let 局部轨迹点: Vec<Pos2> = 轨迹点.iter().map(|点| *点 - 偏移).collect();
 
-        上下文.request_repaint_after(Duration::from_millis(16));
+                    if 局部轨迹点.len() >= 2 {
+                        画笔.add(egui::Shape::line(
+                            局部轨迹点.clone(),
+                            Stroke::new(3.0, Color32::from_white_alpha(190)),
+                        ));
+                    }
+
+                    for (索引, 按钮) in 按钮列表.iter().enumerate() {
+                        let 局部矩形 =
+                            Rect::from_min_max(按钮.矩形.min - 偏移, 按钮.矩形.max - 偏移);
+                        let 已选中 = Some(索引) == 选中按钮;
+                        let 填充 = if 已选中 {
+                            Color32::from_rgba_unmultiplied(80, 150, 255, 180)
+                        } else {
+                            Color32::from_rgba_unmultiplied(30, 30, 30, 150)
+                        };
+                        let 边框 = if 已选中 {
+                            Color32::from_rgb(180, 220, 255)
+                        } else {
+                            Color32::from_white_alpha(120)
+                        };
+                        画笔.rect_filled(局部矩形, 8.0, 填充);
+                        画笔.rect_stroke(
+                            局部矩形,
+                            8.0,
+                            Stroke::new(1.0, 边框),
+                            StrokeKind::Outside,
+                        );
+                        画笔.text(
+                            局部矩形.center(),
+                            Align2::CENTER_CENTER,
+                            按钮.标题,
+                            FontId::proportional(16.0),
+                            Color32::WHITE,
+                        );
+                    }
+
+                    if !提示文字.is_empty() {
+                        let 位置 = 局部轨迹点
+                            .last()
+                            .copied()
+                            .unwrap_or(pos2(默认显示大小.x / 2.0, 默认显示大小.y / 2.0))
+                            + vec2(18.0, -18.0);
+                        画笔.text(
+                            位置,
+                            Align2::LEFT_CENTER,
+                            提示文字,
+                            FontId::proportional(24.0),
+                            Color32::WHITE,
+                        );
+                    }
+                });
+        }
     }
 }
 
@@ -207,31 +222,22 @@ fn 设置窗口不抢焦点(创建上下文: &eframe::CreationContext<'_>) -> Op
     Some(hwnd)
 }
 
-fn 刷新窗口不激活(hwnd: HWND) {
+fn 同步窗口范围(hwnd: HWND, 范围: 窗口范围) {
     unsafe {
         let _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            范围.原点.x as i32,
+            范围.原点.y as i32,
+            范围.大小.x as i32,
+            范围.大小.y as i32,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
     }
 }
 
-fn 当前鼠标位置() -> Pos2 {
-    unsafe {
-        let mut 点 = POINT::default();
-        if GetCursorPos(&mut 点).is_ok() {
-            return pos2(点.x as f32, 点.y as f32);
-        }
-    }
-    pos2(0.0, 0.0)
-}
 
-fn 获取最大化范围(锚点: Pos2) -> 最大化范围 {
+fn 获取显示范围(锚点: Pos2) -> 窗口范围 {
     unsafe {
         let monitor = MonitorFromPoint(
             POINT {
@@ -250,7 +256,7 @@ fn 获取最大化范围(锚点: Pos2) -> 最大化范围 {
             let 宽 = (矩形.right - 矩形.left) as f32;
             let 高 = (矩形.bottom - 矩形.top) as f32;
             if 宽 > 0.0 && 高 > 0.0 {
-                return 最大化范围 {
+                return 窗口范围 {
                     原点: pos2(矩形.left as f32, 矩形.top as f32),
                     大小: vec2(宽, 高),
                 };
@@ -258,9 +264,9 @@ fn 获取最大化范围(锚点: Pos2) -> 最大化范围 {
         }
     }
 
-    最大化范围 {
-        原点: pos2(锚点.x - 初始窗口大小.x / 2.0, 锚点.y - 初始窗口大小.y / 2.0),
-        大小: 初始窗口大小,
+    窗口范围 {
+        原点: pos2(锚点.x - 默认显示大小.x / 2.0, 锚点.y - 默认显示大小.y / 2.0),
+        大小: 默认显示大小,
     }
 }
 

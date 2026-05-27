@@ -4,6 +4,9 @@ use eframe::egui::{pos2, vec2, Pos2, Rect};
 
 use crate::input::{原始鼠标事件, 方向};
 
+pub const 隐藏窗口大小: eframe::egui::Vec2 = eframe::egui::vec2(1.0, 1.0);
+pub const 隐藏窗口位置: Pos2 = pos2(0.0, 0.0);
+
 const 采样距离: f32 = 2.0;
 const 按钮宽度: f32 = 86.0;
 const 按钮高度: f32 = 32.0;
@@ -40,7 +43,7 @@ impl Overlay状态 {
         Self {
             显示: false,
             锚点: None,
-            窗口原点: pos2(-32000.0, -32000.0),
+            窗口原点: 隐藏窗口位置,
             轨迹点: Vec::new(),
             按钮列表: Vec::new(),
             选中按钮: None,
