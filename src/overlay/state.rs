@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{pos2, vec2, Pos2, Rect};
 
+use crate::action::会话预览;
 use crate::config::显示鼠标轨迹;
 use crate::input::{原始鼠标事件, 方向};
 
@@ -36,7 +38,9 @@ pub struct 宫格项 {
 pub enum Overlay事件结果 {
     无,
     会话开始,
-    会话结束,
+    会话结束 {
+        补发位置: Option<Pos2>,
+    },
     方向(方向),
 }
 
@@ -52,8 +56,10 @@ pub struct Overlay状态 {
     pub 悬停宫格: Option<usize>,
     pub 上次悬停宫格: Option<usize>,
     pub 最近方向: Option<方向>,
-    pub 提示文字: String,
     pub 需要重定位: bool,
+    动作预览: 会话预览,
+    世界动作标签: HashMap<(i32, i32), &'static str>,
+    已触发手势: bool,
 }
 
 impl Overlay状态 {
@@ -73,8 +79,10 @@ impl Overlay状态 {
             悬停宫格: None,
             上次悬停宫格: None,
             最近方向: None,
-            提示文字: String::new(),
             需要重定位: false,
+            动作预览: 会话预览::新建(),
+            世界动作标签: HashMap::new(),
+            已触发手势: false,
         }
     }
 
@@ -91,14 +99,16 @@ impl Overlay状态 {
                 self.宫格中心 = 点;
                 self.宫格中心坐标 = (0, 0);
                 self.最近方向 = None;
+                self.动作预览.重置();
+                self.世界动作标签.clear();
+                self.已触发手势 = false;
                 self.轨迹点.clear();
                 if 显示鼠标轨迹 {
                     self.轨迹点.push(点);
                 }
-                self.宫格列表 = 生成宫格(点, self.宫格中心坐标);
+                self.宫格列表 = 生成宫格(点, self.宫格中心坐标, &self.世界动作标签);
                 self.悬停宫格 = 命中宫格(&self.宫格列表, 点);
                 self.上次悬停宫格 = self.悬停宫格;
-                self.提示文字 = "手势开始".to_string();
                 self.需要重定位 = true;
                 Overlay事件结果::会话开始
             }
@@ -120,8 +130,8 @@ impl Overlay状态 {
                 if 显示鼠标轨迹 {
                     self.追加轨迹点(点);
                 }
-                self.关闭();
-                Overlay事件结果::会话结束
+                let 补发位置 = self.关闭();
+                Overlay事件结果::会话结束 { 补发位置 }
             }
         }
     }
@@ -163,13 +173,11 @@ impl Overlay状态 {
             return Overlay事件结果::无;
         };
 
-        self.提示文字 = match 方向 {
-            方向::上 => "上".to_string(),
-            方向::下 => "下".to_string(),
-            方向::左 => "左".to_string(),
-            方向::右 => "右".to_string(),
-            _ => String::new(),
-        };
+        let 触发世界坐标 = 宫格.世界坐标;
+        self.世界动作标签.clear();
+        if let Some(动作名) = self.动作预览.应用方向(方向) {
+            self.世界动作标签.insert(触发世界坐标, 动作名);
+        }
 
         self.宫格中心坐标 = match 方向 {
             方向::上 => (self.宫格中心坐标.0, self.宫格中心坐标.1 - 1),
@@ -179,24 +187,33 @@ impl Overlay状态 {
             _ => self.宫格中心坐标,
         };
         self.最近方向 = Some(方向);
+        self.已触发手势 = true;
 
         let 新中心 = 宫格.矩形.center();
         self.宫格中心 = 新中心;
-        self.宫格列表 = 生成宫格(新中心, self.宫格中心坐标);
+        self.宫格列表 = 生成宫格(新中心, self.宫格中心坐标, &self.世界动作标签);
         self.悬停宫格 = 命中宫格(&self.宫格列表, 点);
         self.上次悬停宫格 = self.悬停宫格;
 
         Overlay事件结果::方向(方向)
     }
 
-    fn 关闭(&mut self) {
+    fn 关闭(&mut self) -> Option<Pos2> {
+        let 补发位置 = if self.已触发手势 {
+            None
+        } else {
+            self.锚点
+        };
         self.显示 = false;
         self.锚点 = None;
         self.悬停宫格 = None;
         self.上次悬停宫格 = None;
         self.最近方向 = None;
-        self.提示文字.clear();
+        self.动作预览.重置();
+        self.世界动作标签.clear();
+        self.已触发手势 = false;
         self.需要重定位 = true;
+        补发位置
     }
 }
 
@@ -204,30 +221,50 @@ fn 命中宫格(宫格列表: &[宫格项], 点: Pos2) -> Option<usize> {
     宫格列表.iter().position(|宫格| 宫格.矩形.contains(点))
 }
 
-fn 生成宫格(中心: Pos2, 中心坐标: (i32, i32)) -> Vec<宫格项> {
+fn 类型默认标签(类型: 宫格类型) -> Option<&'static str> {
+    match 类型 {
+        宫格类型::上 => Some("↑"),
+        宫格类型::下 => Some("↓"),
+        宫格类型::左 => Some("←"),
+        宫格类型::右 => Some("→"),
+        宫格类型::中心 => Some("·"),
+        宫格类型::空白 => None,
+    }
+}
+
+fn 生成宫格(
+    中心: Pos2,
+    中心坐标: (i32, i32),
+    世界动作标签: &HashMap<(i32, i32), &'static str>,
+) -> Vec<宫格项> {
     let 步长 = 宫格边长 + 宫格间距;
-    let 布局: [(i32, i32, 宫格类型, Option<&'static str>); 9] = [
-        (-1, -1, 宫格类型::空白, None),
-        (0, -1, 宫格类型::上, Some("↑")),
-        (1, -1, 宫格类型::空白, None),
-        (-1, 0, 宫格类型::左, Some("←")),
-        (0, 0, 宫格类型::中心, Some("·")),
-        (1, 0, 宫格类型::右, Some("→")),
-        (-1, 1, 宫格类型::空白, None),
-        (0, 1, 宫格类型::下, Some("↓")),
-        (1, 1, 宫格类型::空白, None),
+    let 布局: [(i32, i32, 宫格类型); 9] = [
+        (-1, -1, 宫格类型::空白),
+        (0, -1, 宫格类型::上),
+        (1, -1, 宫格类型::空白),
+        (-1, 0, 宫格类型::左),
+        (0, 0, 宫格类型::中心),
+        (1, 0, 宫格类型::右),
+        (-1, 1, 宫格类型::空白),
+        (0, 1, 宫格类型::下),
+        (1, 1, 宫格类型::空白),
     ];
 
     布局
         .iter()
-        .map(|(列偏移, 行偏移, 类型, 标签)| {
+        .map(|(列偏移, 行偏移, 类型)| {
+            let 世界坐标 = (中心坐标.0 + 列偏移, 中心坐标.1 + 行偏移);
             let 中心偏移 = vec2(*列偏移 as f32 * 步长, *行偏移 as f32 * 步长);
             let 矩形 = Rect::from_center_size(中心 + 中心偏移, vec2(宫格边长, 宫格边长));
+            let 标签 = 世界动作标签
+                .get(&世界坐标)
+                .copied()
+                .or_else(|| 类型默认标签(*类型));
             宫格项 {
-                世界坐标: (中心坐标.0 + 列偏移, 中心坐标.1 + 行偏移),
+                世界坐标,
                 类型: *类型,
                 矩形,
-                标签: *标签,
+                标签,
             }
         })
         .collect()
@@ -267,5 +304,88 @@ mod tests {
             .find(|宫格| 宫格.类型 == 宫格类型::中心)
             .expect("应有中心格");
         assert_eq!(中心格.矩形.center(), 右点);
+        assert_eq!(中心格.标签, Some("右边"));
+    }
+
+    #[test]
+    fn 移入新方向后旧格恢复箭头() {
+        let mut 状态 = Overlay状态::默认();
+        let 起点 = pos2(200.0, 200.0);
+        状态.处理原始事件(原始鼠标事件::右键按下 {
+            x: 起点.x as i32,
+            y: 起点.y as i32,
+        });
+
+        let 右格 = 状态
+            .宫格列表
+            .iter()
+            .find(|宫格| 宫格.类型 == 宫格类型::右)
+            .expect("应有右格");
+        let 右世界 = 右格.世界坐标;
+        let 右点 = 右格.矩形.center();
+        状态.处理原始事件(原始鼠标事件::鼠标移动 {
+            x: 右点.x as i32,
+            y: 右点.y as i32,
+        });
+
+        let 下格 = 状态
+            .宫格列表
+            .iter()
+            .find(|宫格| 宫格.类型 == 宫格类型::下)
+            .expect("应有下格");
+        let 下点 = 下格.矩形.center();
+        状态.处理原始事件(原始鼠标事件::鼠标移动 {
+            x: 下点.x as i32,
+            y: 下点.y as i32,
+        });
+
+        let 旧右格 = 状态
+            .宫格列表
+            .iter()
+            .find(|宫格| 宫格.世界坐标 == 右世界)
+            .expect("原右格仍在范围内");
+        assert_eq!(旧右格.类型, 宫格类型::上);
+        assert_eq!(旧右格.标签, Some("↑"));
+    }
+
+    #[test]
+    fn 未触发手势时结束需补发() {
+        let mut 状态 = Overlay状态::默认();
+        状态.处理原始事件(原始鼠标事件::右键按下 { x: 10, y: 20 });
+        let 结果 = 状态.处理原始事件(原始鼠标事件::右键抬起 { x: 10, y: 20 });
+        assert!(matches!(
+            结果,
+            Overlay事件结果::会话结束 {
+                补发位置: Some(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn 已触发手势时结束不补发() {
+        let mut 状态 = Overlay状态::默认();
+        let 起点 = pos2(200.0, 200.0);
+        状态.处理原始事件(原始鼠标事件::右键按下 {
+            x: 起点.x as i32,
+            y: 起点.y as i32,
+        });
+        let 右格 = 状态
+            .宫格列表
+            .iter()
+            .find(|宫格| 宫格.类型 == 宫格类型::右)
+            .unwrap();
+        let 右点 = 右格.矩形.center();
+        状态.处理原始事件(原始鼠标事件::鼠标移动 {
+            x: 右点.x as i32,
+            y: 右点.y as i32,
+        });
+        let 结果 = 状态.处理原始事件(原始鼠标事件::右键抬起 {
+            x: 右点.x as i32,
+            y: 右点.y as i32,
+        });
+        assert!(matches!(
+            结果,
+            Overlay事件结果::会话结束 { 补发位置: None }
+        ));
     }
 }

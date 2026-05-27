@@ -1,9 +1,5 @@
 use std::sync::mpsc::Sender;
 
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
-};
-
 use crate::config::阈值;
 use crate::input::types::{原始鼠标事件, 方向};
 
@@ -76,15 +72,6 @@ impl 监测器 {
                 }
             }
             原始鼠标事件::右键抬起 { .. } => {
-                let 需要补发 = matches!(
-                    self.状态,
-                    状态::记录中 {
-                        有移动: false, ..
-                    }
-                );
-                if 需要补发 {
-                    补发右键单击();
-                }
                 self.状态 = 状态::空闲;
                 self.发送方向(方向::结束);
             }
@@ -137,32 +124,6 @@ impl 监测器 {
     }
 }
 
-fn 补发右键单击() {
-    let 输入 = [
-        INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dwFlags: MOUSEEVENTF_RIGHTDOWN,
-                    ..Default::default()
-                },
-            },
-        },
-        INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dwFlags: MOUSEEVENTF_RIGHTUP,
-                    ..Default::default()
-                },
-            },
-        },
-    ];
-    unsafe {
-        SendInput(&输入, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn 无位移时抬起需补发右键() {
+    fn 无位移时抬起仅结束会话() {
         let (发送端, 接收端) = mpsc::channel();
         let mut 监测器 = 监测器::新建(发送端);
 

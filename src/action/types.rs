@@ -18,6 +18,8 @@ pub enum 动作类型 {
 
 #[derive(Debug, Clone)]
 pub struct 动作 {
+    pub 名称: &'static str,
+    pub 快捷键: &'static str,
     pub 轨迹: Vec<方向>,
     pub 按键: 待执行动作,
     pub 类型: 动作类型,

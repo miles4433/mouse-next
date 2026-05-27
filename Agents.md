@@ -54,8 +54,9 @@ Hook 线程 ──原始事件 channel──► Overlay 输入线程
 ```
 
 - Hook 回调只读 Windows 事件、转发到 channel、决定吞掉或透传；不维护状态
-- 处理线程仍驱动 `监测器`（补发右键等），但方向 channel 已断开
+- 处理线程仍驱动 `监测器`（轨迹状态保留），但方向 channel 已断开
 - overlay 在 开始~结束 会话内，由宫格命中发送方向；匹配器逻辑不变
+- 本会话未触发手势时，overlay 在浮窗关闭后延迟补发右键单击；已触发手势则不补发
 - 匹配器在 开始~结束 会话内匹配动作；独占动作触发后会话锁定至 结束
 - 执行器将匹配到的按键序列通过 `SendInput` 发送
 
@@ -73,8 +74,8 @@ Hook 线程
 
 - `原始鼠标事件` 是小型 `Copy` 数据，Hook 向处理器和 Overlay 各发送一份。
 - 右键按下：展开 3×3 宫格，发送 `方向::开始`；四角为空白，中心/方向格显示符号。
-- 移入上/下/左/右相邻格：立即发送对应方向，并以该格为新中心重建宫格；保留格标签 morph，范围外淡出，新格逐个淡入。
-- 右键抬起：关闭浮窗，发送 `方向::结束`。
+- 移入上/下/左/右相邻格：立即发送对应方向，并以该格为新中心重建宫格；触发后格内显示动作名称（左边/右边/关闭/恢复），移入新格后旧格恢复方向符号。
+- 右键抬起：关闭浮窗，发送 `方向::结束`；若本会话未触发手势，延迟补发原位置右键单击。
 - 轨迹绘制可选，默认关闭（`config::显示鼠标轨迹`）。
 - 浮窗窗口：空闲 `1x1` 隐藏，手势期间放大到工作区 99%（居中）。
 
@@ -137,11 +138,13 @@ mouse-next/
     │   ├── types.rs
     │   ├── hook.rs
     │   ├── processor.rs
-    │   └── monitor.rs
+    │   ├── monitor.rs
+    │   └── replay.rs
     ├── action/            # 动作模块
     │   ├── mod.rs
     │   ├── types.rs
-    │   ├── registry.rs
+    │   ├── registry.rs    # 动作配置表（名称/轨迹/快捷键/类型）
+    │   ├── preview.rs     # overlay 动作预览
     │   ├── matcher.rs
     │   └── executor.rs
     └── overlay/           # egui 浮窗模块
@@ -180,16 +183,17 @@ mouse-next/
 | [src/input/types.rs](src/input/types.rs) | `原始鼠标事件` 与 `方向`（开始/结束/上/下/左/右） |
 | [src/input/hook.rs](src/input/hook.rs) | `WH_MOUSE_LL` 低层 Hook，独立线程 + 消息泵 |
 | [src/input/processor.rs](src/input/processor.rs) | 处理线程，驱动 `监测器`（方向不再输出到匹配器） |
-| [src/input/monitor.rs](src/input/monitor.rs) | 轨迹状态机：积累位移、发送方向（代码保留）；无任何移动时补发右键单击 |
+| [src/input/monitor.rs](src/input/monitor.rs) | 轨迹状态机：积累位移（代码保留，当前不接匹配器） |
+| [src/input/replay.rs](src/input/replay.rs) | 延迟补发右键单击：先等浮窗关闭，再分按下/抬起时序 |
 
 ### src/overlay/ — 浮窗模块
 
 | 文件 | 说明 |
 |------|------|
 | [src/overlay/mod.rs](src/overlay/mod.rs) | 导出 `运行_overlay窗口`、`启动_overlay输入` 等 |
-| [src/overlay/state.rs](src/overlay/state.rs) | 九宫格生成、世界坐标、命中检测、方向事件 |
+| [src/overlay/state.rs](src/overlay/state.rs) | 九宫格生成、世界坐标、命中检测、动作标签、补发判定 |
 | [src/overlay/animation.rs](src/overlay/animation.rs) | 宫格进入/退出/标签 morph 动画 |
-| [src/overlay/input.rs](src/overlay/input.rs) | 消费原始事件，转发方向到匹配器，请求重绘 |
+| [src/overlay/input.rs](src/overlay/input.rs) | 消费原始事件，转发方向到匹配器，调度右键补发 |
 | [src/overlay/repaint.rs](src/overlay/repaint.rs) | 跨线程 `request_repaint` |
 | [src/overlay/window.rs](src/overlay/window.rs) | egui 绘制、浅色玻璃样式、Win32 窗口几何 |
 
@@ -199,7 +203,8 @@ mouse-next/
 |------|------|
 | [src/action/mod.rs](src/action/mod.rs) | 导出 `启动匹配器`、`启动执行器` |
 | [src/action/types.rs](src/action/types.rs) | `动作`、`动作类型`（重复/独占）、`虚拟键操作` |
-| [src/action/registry.rs](src/action/registry.rs) | 默认动作表：下右/上右/左/右 |
+| [src/action/registry.rs](src/action/registry.rs) | 动作配置表：名称、触发轨迹、快捷键、类型；生成匹配器用 `动作` |
+| [src/action/preview.rs](src/action/preview.rs) | 会话内动作预览，供 overlay 显示触发的动作名称 |
 | [src/action/matcher.rs](src/action/matcher.rs) | 轨迹队列匹配、会话锁定、连续方向 dedup |
 | [src/action/executor.rs](src/action/executor.rs) | `SendInput` 执行按键序列 |
 

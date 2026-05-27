@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, pos2, vec2, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect,
+    self, pos2, vec2, Color32, FontData, FontDefinitions, FontFamily, Pos2, Rect,
     Stroke, StrokeKind, Vec2,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -128,12 +128,10 @@ impl eframe::App for OverlayApp {
         let 显示 = 状态.显示;
         let 窗口原点 = 状态.窗口原点;
         let 轨迹点 = 状态.轨迹点.clone();
-        let 宫格中心 = 状态.宫格中心;
         let 宫格中心坐标 = 状态.宫格中心坐标;
         let 宫格列表 = 状态.宫格列表.clone();
         let 悬停宫格 = 状态.悬停宫格;
         let 最近方向 = 状态.最近方向;
-        let 提示文字 = 状态.提示文字.clone();
         drop(状态);
 
         if 显示 && !self.上次显示 {
@@ -196,37 +194,27 @@ impl eframe::App for OverlayApp {
                             } else {
                                 混合颜色(Color32::from_rgb(40, 45, 55), 参数.不透明度)
                             };
+                            let 字号 = 标签字号(参数.标签);
                             绘制标签(
                                 &画笔,
                                 缩放矩形.center(),
                                 参数.旧标签,
                                 参数.标签,
                                 参数.标签变换进度,
-                                28.0,
+                                字号,
                                 文字色,
                             );
                         }
                     }
-
-                    if !提示文字.is_empty() {
-                        let 位置 = if 显示鼠标轨迹 {
-                            局部轨迹点
-                                .last()
-                                .copied()
-                                .unwrap_or(pos2(默认显示大小.x / 2.0, 默认显示大小.y / 2.0))
-                        } else {
-                            宫格中心 - 偏移
-                        } + vec2(18.0, -18.0);
-                        画笔.text(
-                            位置,
-                            Align2::LEFT_CENTER,
-                            提示文字,
-                            FontId::proportional(24.0),
-                            Color32::WHITE,
-                        );
-                    }
                 });
         }
+    }
+}
+
+fn 标签字号(标签: Option<&str>) -> f32 {
+    match 标签.map(|文字| 文字.chars().count()).unwrap_or(0) {
+        0 | 1 => 28.0,
+        _ => 20.0,
     }
 }
 

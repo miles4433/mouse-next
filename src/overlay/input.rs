@@ -1,7 +1,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
-use crate::input::{原始鼠标事件, 方向};
+use crate::input::{原始鼠标事件, 方向, 调度补发右键单击};
 
 use super::repaint::{Overlay重绘信号, 请求重绘};
 use super::state::{Overlay事件结果, Overlay共享状态};
@@ -22,7 +22,7 @@ pub fn 启动_overlay输入(
                 })
                 .unwrap_or((Overlay事件结果::无, false));
 
-            转发方向(&方向发送端, 事件结果);
+            转发方向与补发(&方向发送端, 事件结果);
 
             if 需要重绘 {
                 请求重绘(&重绘信号);
@@ -31,14 +31,17 @@ pub fn 启动_overlay输入(
     });
 }
 
-fn 转发方向(方向发送端: &Sender<方向>, 事件结果: Overlay事件结果) {
+fn 转发方向与补发(方向发送端: &Sender<方向>, 事件结果: Overlay事件结果) {
     match 事件结果 {
         Overlay事件结果::无 => {}
         Overlay事件结果::会话开始 => {
             let _ = 方向发送端.send(方向::开始);
         }
-        Overlay事件结果::会话结束 => {
+        Overlay事件结果::会话结束 { 补发位置 } => {
             let _ = 方向发送端.send(方向::结束);
+            if let Some(位置) = 补发位置 {
+                调度补发右键单击(位置.x as i32, 位置.y as i32);
+            }
         }
         Overlay事件结果::方向(方向) => {
             let _ = 方向发送端.send(方向);
