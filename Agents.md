@@ -2,9 +2,9 @@
 
 系统级鼠标手势工具（Rust / Windows）。在系统层面监测鼠标按键与轨迹，识别方向并映射为键盘快捷键，控制浏览器 tab 等。
 
-**当前进度**：输入监测、动作模块、egui overlay 小尺寸浮窗方案已可用。白名单、Ctrl 按住/松开、真实 tab 数据尚未实现。
+**当前进度**：输入监测、动作模块、egui overlay 九宫格手势 UI 已可用。方向触发已改为 overlay 宫格命中；轨迹距离判断代码保留但不再驱动动作。白名单、Ctrl 按住/松开、真实 tab 数据尚未实现。
 
-**当前目标**：在现有 overlay 窗口模型上继续演进 UI（按钮、菜单、窗口预览等），不再验证穿透/常驻大窗口方案。
+**当前目标**：在现有 overlay 窗口模型上继续演进 UI（宫格动画、菜单、窗口预览等），不再验证穿透/常驻大窗口方案。
 
 **计划状态**：已确认方案，计划文件为 `egui 手势浮窗`。当前阶段优先保持同步线程 + `std::sync::mpsc` 的简单可靠风格；Tokio 不在本阶段引入，后续外部通信模块需要异步 I/O 时再在模块内部局部封装。
 
@@ -13,18 +13,20 @@
 目标：先稳定 egui overlay 的窗口行为，使手势期间能可靠显示轨迹和按钮，并且不抢焦点、不破坏原本快捷键输入；不要在本阶段扩展真实 tab 数据、浏览器扩展或复杂菜单系统。
 
 - [x] 接入 `eframe/egui` overlay，展示右键手势轨迹和少量功能按钮。
-- [x] 保持核心手势识别只有一份，Overlay 只展示事件和结果，不参与动作判断。
-- [x] 右键抬起时根据当前选中按钮发送假动作。
+- [x] 改为 3×3 动态九宫格：移入上/下/左/右格触发方向，以该格为新中心重建宫格。
+- [x] 宫格动画：保留格标签 morph、范围外淡出、新格逐个淡入。
+- [x] 方向唯一来源为 overlay 宫格命中；`monitor` 轨迹阈值逻辑保留但不接动作匹配器。
 - [x] 小尺寸隐藏 + 触发放大 + 事件驱动重绘的 overlay 窗口模型。
 
 ## 已确认设计偏好
 
 - 简单可靠优先：核心输入链路继续使用同步线程和 channel，不为当前浮窗提前引入 Tokio。
 - Hook 低层稳定：Hook 只采集 Windows 鼠标事件、判断右键吞掉/透传、发送事件，不维护浮窗状态、不做手势识别。
-- 手势识别只有一份：UI 不重新计算方向、不重新判断动作，避免显示结果和真实执行结果不同步。
-- UI 可以消费原始坐标来控制打开、画线、关闭，但这只是展示生命周期，不属于动作识别逻辑。
-- 方向和动作提示来自核心逻辑，后续可用于显示图标、文字、动作名。
-- 当前先做假功能：按钮选中后先打印文字或发送占位执行包，后续再绑定真实浏览器/VScode/资源管理器功能。
+- 方向触发在 overlay：`monitor` 仍积累位移但不再向匹配器发方向；移入宫格上/下/左/右时 overlay 发送 `方向`，驱动原有动作表。
+- UI 不参与动作匹配逻辑，只负责宫格命中检测、视觉反馈和方向事件转发。
+- UI 可以消费原始坐标来控制打开、画线、关闭；轨迹显示由 `config::显示鼠标轨迹` 控制，默认关闭。
+- 方向和动作提示来自 overlay 宫格交互，可用于显示图标、文字、动作名。
+- 右键抬起只关闭浮窗并发送 `方向::结束`，不再绑定假按钮打印。
 - 后续外部数据模块独立：浏览器扩展、VSCode tab、Windows 资源管理器 tab 获取都应独立成数据服务，不直接侵入 Hook 或手势处理器。
 - 文档保留高层上下文、关键取舍、项目偏好；具体实现细节优先放在代码结构和必要注释里。
 - 修改应贴合当前代码风格，避免为未来可能性提前引入重架构。
@@ -36,37 +38,45 @@
 五线程单向事件流：
 
 ```
-Hook 线程 ──原始事件 channel──► 处理线程 ──方向 channel──► 匹配器线程
-  WH_MOUSE_LL 转发              监测器状态机              轨迹队列 + 动作匹配
-  固定规则吞/透传               轨迹积累 + 补发右键              │
-                                                                ▼
-主线程（等待退出）◄────────────────────────────────── 执行 queue ──► 执行器线程
-                                                                      SendInput
+Hook 线程 ──原始事件 channel──► 处理线程（monitor，仅保留逻辑）
+  WH_MOUSE_LL 转发              不再向匹配器发方向
+  固定规则吞/透传                     │
+                                      │
+Hook 线程 ──原始事件 channel──► Overlay 输入线程
+                                      │ 宫格命中 → 方向 channel
+                                      ▼
+                              匹配器线程 ◄── 方向::开始/结束/上/下/左/右
+                              轨迹队列 + 动作匹配
+                                      │
+                                      ▼
+主线程（egui 窗口）◄── 重绘信号 ── 执行 queue ──► 执行器线程
+                                      SendInput
 ```
 
 - Hook 回调只读 Windows 事件、转发到 channel、决定吞掉或透传；不维护状态
-- 处理线程持有 `监测器`，维护跨事件状态
-- 右键按下/抬起分别发送 `方向::开始` / `方向::结束`
+- 处理线程仍驱动 `监测器`（补发右键等），但方向 channel 已断开
+- overlay 在 开始~结束 会话内，由宫格命中发送方向；匹配器逻辑不变
 - 匹配器在 开始~结束 会话内匹配动作；独占动作触发后会话锁定至 结束
 - 执行器将匹配到的按键序列通过 `SendInput` 发送
 
 ## 浮窗计划架构
 
-egui 浮窗不参与手势识别逻辑，只消费事件并展示状态。真实手势判断仍然只保留一份，避免 UI 展示和实际动作不同步。
+egui 浮窗负责宫格 UI 与方向触发，不参与动作匹配。动作仍由匹配器 + 执行器完成。
 
 ```
 Hook 线程
-  ├── 原始鼠标事件 -> 处理线程 -> 方向事件 -> 匹配器线程 -> 执行器线程
+  ├── 原始鼠标事件 -> 处理线程（monitor，保留逻辑）
   └── 原始鼠标事件 -> Overlay 状态 -> egui 透明浮窗
-
-方向/动作结果也可额外发送给 Overlay，用于显示当前方向、动作名、按钮说明。
+                              │
+                              └── 宫格命中 -> 方向 channel -> 匹配器 -> 执行器
 ```
 
-- `原始鼠标事件` 是小型 `Copy` 数据，Hook 可直接向处理器和 Overlay 各发送一份，暂不引入额外分发器或 Tokio。
-- UI 用原始屏幕坐标画轨迹：右键按下打开并记录锚点，鼠标移动追加/更新轨迹点，右键抬起发送选中按钮对应动作并关闭。
-- 轨迹绘制使用降采样；hook 事件更新状态并 `request_repaint()`，不使用定时轮询。
-- 浮窗窗口：空闲 `1x1` 隐藏，手势期间放大到工作区 99%（居中）；完全贴满会导致浏览器切换 tab 后不刷新。
-- 当前按钮为假功能，先打印文字或发送占位执行包；后续再绑定真实动作。
+- `原始鼠标事件` 是小型 `Copy` 数据，Hook 向处理器和 Overlay 各发送一份。
+- 右键按下：展开 3×3 宫格，发送 `方向::开始`；四角为空白，中心/方向格显示符号。
+- 移入上/下/左/右相邻格：立即发送对应方向，并以该格为新中心重建宫格；保留格标签 morph，范围外淡出，新格逐个淡入。
+- 右键抬起：关闭浮窗，发送 `方向::结束`。
+- 轨迹绘制可选，默认关闭（`config::显示鼠标轨迹`）。
+- 浮窗窗口：空闲 `1x1` 隐藏，手势期间放大到工作区 99%（居中）。
 
 ## 关键实现原则
 
@@ -81,11 +91,12 @@ Hook 线程
 ```
 src/
 ├── overlay/
-│   ├── mod.rs       # Overlay 模块入口，导出启动函数和事件类型
-│   ├── state.rs     # visible、锚点、轨迹点、按钮、选中态、提示文本
-│   ├── input.rs     # 消费 hook/方向事件，请求重绘
+│   ├── mod.rs       # Overlay 模块入口
+│   ├── state.rs     # 宫格状态、命中检测、世界坐标、方向事件
+│   ├── animation.rs # 宫格进入/退出/标签 morph 动画
+│   ├── input.rs     # 消费 hook 事件，转发方向到匹配器
 │   ├── repaint.rs   # 跨线程 request_repaint
-│   └── window.rs    # egui/eframe 窗口、Win32 几何切换
+│   └── window.rs    # egui 绘制、浅色玻璃样式、Win32 几何切换
 └── external/        # 后续外部数据服务，可选
     ├── browser.rs   # 浏览器扩展 / tab 列表
     ├── vscode.rs    # VSCode tab 列表
@@ -101,7 +112,7 @@ src/
 - 外部数据服务：后续浏览器扩展、VSCode、Windows 资源管理器 tab 列表获取，建议独立成模块。
 - 局部 Tokio：如果外部数据服务需要 WebSocket、HTTP、Native Messaging、IPC、定时任务等异步 I/O，可在对应模块内部启动 Tokio runtime；对主程序仍只暴露普通 channel 接口。
 - 核心链路保持同步：Hook、手势处理、动作匹配、SendInput、Overlay 状态更新继续优先使用同步线程和 channel，保证路径简单、低延迟、容易调试。
-- UI 形态可演进：当前先显示轨迹和少量按钮，后续可替换为半透明菜单面板、tab 列表选择器或类似 Alt+Tab 的切换面板。
+- UI 形态可演进：当前为动态九宫格 + 动画，后续可替换为 tab 列表选择器或类似 Alt+Tab 的切换面板。
 
 ## 命名规范
 
@@ -120,19 +131,26 @@ mouse-next/
 ├── .gitignore             # 忽略 /target
 └── src/
     ├── main.rs            # 程序入口
-    ├── config.rs          # 方向阈值等全局配置
+    ├── config.rs          # 方向阈值、显示鼠标轨迹等全局配置
     ├── input/             # 输入监测模块
     │   ├── mod.rs
     │   ├── types.rs
     │   ├── hook.rs
     │   ├── processor.rs
     │   └── monitor.rs
-    └── action/            # 动作模块
+    ├── action/            # 动作模块
+    │   ├── mod.rs
+    │   ├── types.rs
+    │   ├── registry.rs
+    │   ├── matcher.rs
+    │   └── executor.rs
+    └── overlay/           # egui 浮窗模块
         ├── mod.rs
-        ├── types.rs
-        ├── registry.rs
-        ├── matcher.rs
-        └── executor.rs
+        ├── state.rs
+        ├── animation.rs
+        ├── input.rs
+        ├── repaint.rs
+        └── window.rs
 ```
 
 ## 文件说明
@@ -151,8 +169,8 @@ mouse-next/
 
 | 文件 | 说明 |
 |------|------|
-| [src/main.rs](src/main.rs) | 入口。创建三个 `mpsc` channel，启动 Hook / 处理 / 匹配器 / 执行器线程；主线程等待 Ctrl+C 退出 |
-| [src/config.rs](src/config.rs) | `方向阈值` 结构体：基础 100px、水平倍率 2.0；上下用 `垂直()`，左右用 `水平()` |
+| [src/main.rs](src/main.rs) | 入口。创建 channel，启动 Hook / 处理 / 匹配器 / Overlay 输入 / 执行器；主线程运行 egui 浮窗 |
+| [src/config.rs](src/config.rs) | `方向阈值`（基础 100px、水平倍率 2.0）；`显示鼠标轨迹`（默认 false） |
 
 ### src/input/ — 输入监测模块
 
@@ -161,8 +179,19 @@ mouse-next/
 | [src/input/mod.rs](src/input/mod.rs) | 输入模块入口，导出 `启动_hook`、`启动处理器`、`方向` |
 | [src/input/types.rs](src/input/types.rs) | `原始鼠标事件` 与 `方向`（开始/结束/上/下/左/右） |
 | [src/input/hook.rs](src/input/hook.rs) | `WH_MOUSE_LL` 低层 Hook，独立线程 + 消息泵 |
-| [src/input/processor.rs](src/input/processor.rs) | 处理线程，驱动 `监测器` |
-| [src/input/monitor.rs](src/input/monitor.rs) | 轨迹状态机：积累位移、发送方向；同轴反向重置；各轴独立触发；无任何移动时补发右键单击 |
+| [src/input/processor.rs](src/input/processor.rs) | 处理线程，驱动 `监测器`（方向不再输出到匹配器） |
+| [src/input/monitor.rs](src/input/monitor.rs) | 轨迹状态机：积累位移、发送方向（代码保留）；无任何移动时补发右键单击 |
+
+### src/overlay/ — 浮窗模块
+
+| 文件 | 说明 |
+|------|------|
+| [src/overlay/mod.rs](src/overlay/mod.rs) | 导出 `运行_overlay窗口`、`启动_overlay输入` 等 |
+| [src/overlay/state.rs](src/overlay/state.rs) | 九宫格生成、世界坐标、命中检测、方向事件 |
+| [src/overlay/animation.rs](src/overlay/animation.rs) | 宫格进入/退出/标签 morph 动画 |
+| [src/overlay/input.rs](src/overlay/input.rs) | 消费原始事件，转发方向到匹配器，请求重绘 |
+| [src/overlay/repaint.rs](src/overlay/repaint.rs) | 跨线程 `request_repaint` |
+| [src/overlay/window.rs](src/overlay/window.rs) | egui 绘制、浅色玻璃样式、Win32 窗口几何 |
 
 ### src/action/ — 动作模块
 

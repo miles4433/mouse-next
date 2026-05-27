@@ -1,3 +1,4 @@
+mod animation;
 mod input;
 mod repaint;
 mod state;

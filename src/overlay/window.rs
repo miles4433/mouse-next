@@ -3,9 +3,8 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect,
-    Shape, Stroke, StrokeKind, Vec2,
+    Stroke, StrokeKind, Vec2,
 };
-use eframe::egui::epaint::Mesh;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::{
@@ -18,12 +17,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::config::显示鼠标轨迹;
+use super::animation::{混合颜色, 宫格动画器, 缩放矩形, 绘制标签};
 use super::repaint::{Overlay重绘信号, 注册重绘上下文};
 use super::state::{Overlay共享状态, 宫格类型, 隐藏窗口位置, 隐藏窗口大小};
 
 const 默认显示大小: egui::Vec2 = egui::vec2(520.0, 320.0);
 const 显示区域比例: f32 = 0.99;
-const 宫格圆角: f32 = 14.0;
+const 宫格圆角: f32 = 18.0;
 
 #[derive(Clone, Copy, PartialEq)]
 struct 窗口范围 {
@@ -64,6 +64,9 @@ pub fn 运行_overlay窗口(状态: Overlay共享状态, 重绘信号: Overlay�
                 重绘信号,
                 当前范围: 初始范围,
                 hwnd,
+                宫格动画: 宫格动画器::新建(),
+                上次显示: false,
+                上次宫格快照: None,
             }))
         }),
     ) {
@@ -76,6 +79,9 @@ struct OverlayApp {
     重绘信号: Overlay重绘信号,
     当前范围: 窗口范围,
     hwnd: Option<HWND>,
+    宫格动画: 宫格动画器,
+    上次显示: bool,
+    上次宫格快照: Option<(i32, i32)>,
 }
 
 impl eframe::App for OverlayApp {
@@ -123,12 +129,39 @@ impl eframe::App for OverlayApp {
         let 窗口原点 = 状态.窗口原点;
         let 轨迹点 = 状态.轨迹点.clone();
         let 宫格中心 = 状态.宫格中心;
+        let 宫格中心坐标 = 状态.宫格中心坐标;
         let 宫格列表 = 状态.宫格列表.clone();
         let 悬停宫格 = 状态.悬停宫格;
+        let 最近方向 = 状态.最近方向;
         let 提示文字 = 状态.提示文字.clone();
         drop(状态);
 
+        if 显示 && !self.上次显示 {
+            self.宫格动画.重置();
+            self.上次宫格快照 = None;
+        }
+        if !显示 && self.上次显示 {
+            self.宫格动画.重置();
+            self.上次宫格快照 = None;
+        }
+        self.上次显示 = 显示;
+
         if 显示 {
+            let 当前时间 = 上下文.input(|输入| 输入.time);
+            let 帧间隔 = 上下文.input(|输入| 输入.stable_dt).clamp(0.001, 0.05);
+            let 当前快照 = 宫格中心坐标;
+            if self.上次宫格快照 != Some(当前快照) {
+                self.宫格动画.同步(当前时间, &宫格列表, 最近方向);
+                self.上次宫格快照 = Some(当前快照);
+            }
+            if self.宫格动画.更新(当前时间, 帧间隔) {
+                上下文.request_repaint();
+            }
+
+            let 悬停世界坐标 =
+                悬停宫格.and_then(|索引| 宫格列表.get(索引).map(|项| 项.世界坐标));
+            let 绘制列表 = self.宫格动画.绘制列表(当前时间);
+
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(上下文, |ui| {
@@ -139,26 +172,37 @@ impl eframe::App for OverlayApp {
                     if 显示鼠标轨迹 && 局部轨迹点.len() >= 2 {
                         画笔.add(egui::Shape::line(
                             局部轨迹点.clone(),
-                            Stroke::new(3.0, Color32::from_white_alpha(190)),
+                            Stroke::new(2.0, Color32::from_white_alpha(140)),
                         ));
                     }
 
-                    for (索引, 宫格) in 宫格列表.iter().enumerate() {
-                        let 局部矩形 =
-                            Rect::from_min_max(宫格.矩形.min - 偏移, 宫格.矩形.max - 偏移);
-                        let 已悬停 = Some(索引) == 悬停宫格;
-                        绘制玻璃宫格(&画笔, 局部矩形, 宫格.类型, 已悬停);
-                        if let Some(标签) = 宫格.标签 {
-                            let 文字色 = if 已悬停 && 宫格.类型 != 宫格类型::空白 {
-                                Color32::from_rgb(220, 240, 255)
+                    for 参数 in 绘制列表 {
+                        let 局部矩形 = Rect::from_min_max(
+                            参数.矩形.min - 偏移,
+                            参数.矩形.max - 偏移,
+                        );
+                        let 缩放矩形 = 缩放矩形(局部矩形, 参数.缩放);
+                        let 已悬停 = 悬停世界坐标 == Some(参数.世界坐标);
+                        绘制浅色玻璃宫格(
+                            &画笔,
+                            缩放矩形,
+                            参数.类型,
+                            已悬停,
+                            参数.不透明度,
+                        );
+                        if 参数.标签.is_some() || 参数.旧标签.is_some() {
+                            let 文字色 = if 已悬停 && 参数.类型 != 宫格类型::空白 {
+                                混合颜色(Color32::from_rgb(30, 90, 210), 参数.不透明度)
                             } else {
-                                Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+                                混合颜色(Color32::from_rgb(40, 45, 55), 参数.不透明度)
                             };
-                            画笔.text(
-                                局部矩形.center(),
-                                Align2::CENTER_CENTER,
-                                标签,
-                                FontId::proportional(28.0),
+                            绘制标签(
+                                &画笔,
+                                缩放矩形.center(),
+                                参数.旧标签,
+                                参数.标签,
+                                参数.标签变换进度,
+                                28.0,
                                 文字色,
                             );
                         }
@@ -186,99 +230,72 @@ impl eframe::App for OverlayApp {
     }
 }
 
-fn 绘制玻璃宫格(画笔: &egui::Painter, 矩形: Rect, 类型: 宫格类型, 已悬停: bool) {
+fn 绘制浅色玻璃宫格(
+    画笔: &egui::Painter,
+    矩形: Rect,
+    类型: 宫格类型,
+    已悬停: bool,
+    不透明度: f32,
+) {
     let 是空白 = 类型 == 宫格类型::空白;
     let 是中心 = 类型 == 宫格类型::中心;
     let 可交互 = !是空白 && !是中心;
 
-    if 已悬停 && 可交互 {
-        let 光晕 = 矩形.expand(6.0);
-        添加垂直渐变(
-            画笔,
-            光晕,
-            Color32::from_rgba_unmultiplied(80, 160, 255, 0),
-            Color32::from_rgba_unmultiplied(80, 160, 255, 55),
+    let 阴影 = 矩形.translate(vec2(0.0, 1.5)).expand(0.5);
+    画笔.rect_filled(
+        阴影,
+        宫格圆角,
+        混合颜色(Color32::from_rgba_unmultiplied(0, 0, 0, 18), 不透明度),
+    );
+
+    let 填充 = if 已悬停 && 可交互 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 118)
+    } else if 是中心 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 92)
+    } else if 是空白 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 72)
+    };
+    画笔.rect_filled(矩形, 宫格圆角, 混合颜色(填充, 不透明度));
+
+    if !是空白 {
+        let 高光条 = Rect::from_min_max(
+            pos2(矩形.min.x + 8.0, 矩形.min.y + 5.0),
+            pos2(矩形.max.x - 8.0, 矩形.min.y + 6.5),
+        );
+        画笔.rect_filled(
+            高光条,
+            1.0,
+            混合颜色(Color32::from_rgba_unmultiplied(255, 255, 255, 90), 不透明度),
         );
     }
 
-    let 阴影 = 矩形.translate(vec2(0.0, 3.0)).expand(1.0);
-    画笔.rect_filled(阴影, 宫格圆角 + 2.0, Color32::from_rgba_unmultiplied(0, 0, 0, 45));
-
-    let (顶色, 底色, 底色实) = if 已悬停 && 可交互 {
-        (
-            Color32::from_rgba_unmultiplied(120, 190, 255, 130),
-            Color32::from_rgba_unmultiplied(40, 90, 180, 170),
-            Color32::from_rgba_unmultiplied(70, 130, 210, 150),
-        )
-    } else if 是中心 {
-        (
-            Color32::from_rgba_unmultiplied(255, 255, 255, 55),
-            Color32::from_rgba_unmultiplied(80, 85, 100, 120),
-            Color32::from_rgba_unmultiplied(90, 92, 105, 100),
-        )
+    let 边框 = if 已悬停 && 可交互 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 200)
     } else if 是空白 {
-        (
-            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
-            Color32::from_rgba_unmultiplied(30, 35, 45, 35),
-            Color32::from_rgba_unmultiplied(25, 30, 40, 30),
-        )
+        Color32::from_rgba_unmultiplied(255, 255, 255, 45)
     } else {
-        (
-            Color32::from_rgba_unmultiplied(255, 255, 255, 48),
-            Color32::from_rgba_unmultiplied(50, 55, 70, 110),
-            Color32::from_rgba_unmultiplied(45, 50, 65, 90),
-        )
-    };
-    画笔.rect_filled(矩形, 宫格圆角, 底色实);
-    添加垂直渐变(画笔, 矩形.shrink(1.0), 顶色, 底色);
-
-    let 高光高 = 矩形.height() * 0.42;
-    let 高光区 = Rect::from_min_max(矩形.min, pos2(矩形.max.x, 矩形.min.y + 高光高));
-    添加垂直渐变(
-        画笔,
-        高光区,
-        Color32::from_rgba_unmultiplied(255, 255, 255, if 是空白 { 12 } else { 38 }),
-        Color32::from_rgba_unmultiplied(255, 255, 255, 0),
-    );
-
-    let 边框色 = if 已悬停 && 可交互 {
-        Color32::from_rgba_unmultiplied(200, 230, 255, 220)
-    } else if 是空白 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 35)
-    } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 90)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 130)
     };
     画笔.rect_stroke(
         矩形,
         宫格圆角,
-        Stroke::new(if 已悬停 && 可交互 { 1.5 } else { 1.0 }, 边框色),
+        Stroke::new(if 已悬停 && 可交互 { 1.2 } else { 0.75 }, 混合颜色(边框, 不透明度)),
         StrokeKind::Outside,
     );
 
-    let 内缘 = 矩形.shrink(1.0);
-    画笔.rect_stroke(
-        内缘,
-        宫格圆角 - 1.0,
-        Stroke::new(0.5, Color32::from_rgba_unmultiplied(255, 255, 255, 25)),
-        StrokeKind::Inside,
-    );
-}
-
-fn 添加垂直渐变(画笔: &egui::Painter, 矩形: Rect, 顶色: Color32, 底色: Color32) {
-    let 左上 = 矩形.left_top();
-    let 右上 = 矩形.right_top();
-    let 左下 = 矩形.left_bottom();
-    let 右下 = 矩形.right_bottom();
-
-    let mut 网格 = Mesh::default();
-    网格.colored_vertex(左上, 顶色);
-    网格.colored_vertex(右上, 顶色);
-    网格.colored_vertex(左下, 底色);
-    网格.colored_vertex(右下, 底色);
-    网格.add_triangle(0, 1, 2);
-    网格.add_triangle(1, 3, 2);
-
-    画笔.add(Shape::mesh(网格));
+    if 已悬停 && 可交互 {
+        画笔.rect_stroke(
+            矩形.shrink(3.0),
+            宫格圆角 - 3.0,
+            Stroke::new(
+                1.0,
+                混合颜色(Color32::from_rgba_unmultiplied(80, 150, 255, 90), 不透明度),
+            ),
+            StrokeKind::Inside,
+        );
+    }
 }
 
 fn 设置窗口不抢焦点(创建上下文: &eframe::CreationContext<'_>) -> Option<HWND> {

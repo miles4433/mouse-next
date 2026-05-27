@@ -26,6 +26,7 @@ pub enum 宫格类型 {
 
 #[derive(Debug, Clone)]
 pub struct 宫格项 {
+    pub 世界坐标: (i32, i32),
     pub 类型: 宫格类型,
     pub 矩形: Rect,
     pub 标签: Option<&'static str>,
@@ -46,9 +47,11 @@ pub struct Overlay状态 {
     pub 窗口原点: Pos2,
     pub 轨迹点: Vec<Pos2>,
     pub 宫格中心: Pos2,
+    pub 宫格中心坐标: (i32, i32),
     pub 宫格列表: Vec<宫格项>,
     pub 悬停宫格: Option<usize>,
     pub 上次悬停宫格: Option<usize>,
+    pub 最近方向: Option<方向>,
     pub 提示文字: String,
     pub 需要重定位: bool,
 }
@@ -65,9 +68,11 @@ impl Overlay状态 {
             窗口原点: 隐藏窗口位置,
             轨迹点: Vec::new(),
             宫格中心: Pos2::ZERO,
+            宫格中心坐标: (0, 0),
             宫格列表: Vec::new(),
             悬停宫格: None,
             上次悬停宫格: None,
+            最近方向: None,
             提示文字: String::new(),
             需要重定位: false,
         }
@@ -84,11 +89,13 @@ impl Overlay状态 {
                 self.显示 = true;
                 self.锚点 = Some(点);
                 self.宫格中心 = 点;
+                self.宫格中心坐标 = (0, 0);
+                self.最近方向 = None;
                 self.轨迹点.clear();
                 if 显示鼠标轨迹 {
                     self.轨迹点.push(点);
                 }
-                self.宫格列表 = 生成宫格(点);
+                self.宫格列表 = 生成宫格(点, self.宫格中心坐标);
                 self.悬停宫格 = 命中宫格(&self.宫格列表, 点);
                 self.上次悬停宫格 = self.悬停宫格;
                 self.提示文字 = "手势开始".to_string();
@@ -164,9 +171,18 @@ impl Overlay状态 {
             _ => String::new(),
         };
 
+        self.宫格中心坐标 = match 方向 {
+            方向::上 => (self.宫格中心坐标.0, self.宫格中心坐标.1 - 1),
+            方向::下 => (self.宫格中心坐标.0, self.宫格中心坐标.1 + 1),
+            方向::左 => (self.宫格中心坐标.0 - 1, self.宫格中心坐标.1),
+            方向::右 => (self.宫格中心坐标.0 + 1, self.宫格中心坐标.1),
+            _ => self.宫格中心坐标,
+        };
+        self.最近方向 = Some(方向);
+
         let 新中心 = 宫格.矩形.center();
         self.宫格中心 = 新中心;
-        self.宫格列表 = 生成宫格(新中心);
+        self.宫格列表 = 生成宫格(新中心, self.宫格中心坐标);
         self.悬停宫格 = 命中宫格(&self.宫格列表, 点);
         self.上次悬停宫格 = self.悬停宫格;
 
@@ -178,6 +194,7 @@ impl Overlay状态 {
         self.锚点 = None;
         self.悬停宫格 = None;
         self.上次悬停宫格 = None;
+        self.最近方向 = None;
         self.提示文字.clear();
         self.需要重定位 = true;
     }
@@ -187,7 +204,7 @@ fn 命中宫格(宫格列表: &[宫格项], 点: Pos2) -> Option<usize> {
     宫格列表.iter().position(|宫格| 宫格.矩形.contains(点))
 }
 
-fn 生成宫格(中心: Pos2) -> Vec<宫格项> {
+fn 生成宫格(中心: Pos2, 中心坐标: (i32, i32)) -> Vec<宫格项> {
     let 步长 = 宫格边长 + 宫格间距;
     let 布局: [(i32, i32, 宫格类型, Option<&'static str>); 9] = [
         (-1, -1, 宫格类型::空白, None),
@@ -207,6 +224,7 @@ fn 生成宫格(中心: Pos2) -> Vec<宫格项> {
             let 中心偏移 = vec2(*列偏移 as f32 * 步长, *行偏移 as f32 * 步长);
             let 矩形 = Rect::from_center_size(中心 + 中心偏移, vec2(宫格边长, 宫格边长));
             宫格项 {
+                世界坐标: (中心坐标.0 + 列偏移, 中心坐标.1 + 行偏移),
                 类型: *类型,
                 矩形,
                 标签: *标签,
