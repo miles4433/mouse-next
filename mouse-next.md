@@ -32,7 +32,7 @@
 ### 手势 overlay
 当前使用 egui/eframe 原型验证透明浮窗。目标是在右键手势期间展示轨迹、方向提示和少量功能按钮；按钮先绑定假功能，用于验证 hover 和触发链路。
 
-当前使用 egui/eframe。空闲时 `1x1` 隐藏，右键手势期间放大到当前显示器工作区，由 hook 事件驱动重绘。详见 `overlay-window-mechanism.md`。
+当前使用 egui/eframe。空闲时 `1x1` 隐藏，手势期间放大到工作区 99%（居中），由 hook 事件驱动重绘。完全贴满工作区会导致浏览器 tab 切换后不刷新。详见 `overlay-window-mechanism.md`。
 
 # 功能模块
 

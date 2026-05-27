@@ -20,6 +20,7 @@ use super::repaint::{Overlay重绘信号, 注册重绘上下文};
 use super::state::{Overlay共享状态, 隐藏窗口位置, 隐藏窗口大小};
 
 const 默认显示大小: egui::Vec2 = egui::vec2(520.0, 320.0);
+const 显示区域比例: f32 = 0.99;
 
 #[derive(Clone, Copy, PartialEq)]
 struct 窗口范围 {
@@ -246,9 +247,14 @@ fn 获取显示范围(锚点: Pos2) -> 窗口范围 {
             let 宽 = (矩形.right - 矩形.left) as f32;
             let 高 = (矩形.bottom - 矩形.top) as f32;
             if 宽 > 0.0 && 高 > 0.0 {
+                let 显示宽 = 宽 * 显示区域比例;
+                let 显示高 = 高 * 显示区域比例;
                 return 窗口范围 {
-                    原点: pos2(矩形.left as f32, 矩形.top as f32),
-                    大小: vec2(宽, 高),
+                    原点: pos2(
+                        矩形.left as f32 + (宽 - 显示宽) / 2.0,
+                        矩形.top as f32 + (高 - 显示高) / 2.0,
+                    ),
+                    大小: vec2(显示宽, 显示高),
                 };
             }
         }
