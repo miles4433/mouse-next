@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use eframe::egui::{pos2, vec2, Pos2, Rect};
+use eframe::egui::{pos2, vec2, ColorImage, Pos2, Rect};
 
 use crate::action::会话预览;
 use crate::config::显示鼠标轨迹;
@@ -44,6 +44,14 @@ pub enum Overlay事件结果 {
     方向(方向),
 }
 
+#[derive(Debug, Clone)]
+pub struct 冻结缓存条目 {
+    pub 图像: Arc<ColorImage>,
+    /// 截屏窗口左上角，屏幕物理像素坐标
+    pub 屏幕左: i32,
+    pub 屏幕上: i32,
+}
+
 #[derive(Debug)]
 pub struct Overlay状态 {
     pub 显示: bool,
@@ -60,6 +68,13 @@ pub struct Overlay状态 {
     动作预览: 会话预览,
     世界动作标签: HashMap<(i32, i32), &'static str>,
     已触发手势: bool,
+    pub overlay句柄: Option<isize>,
+    pub 缓存冻结帧: Option<Arc<冻结缓存条目>>,
+    pub 缓存刷新代际: u64,
+    pub 冻结帧: Option<ColorImage>,
+    pub 冻结帧屏幕原点: Option<Pos2>,
+    pub 冻结不透明度: f32,
+    pub 冻结淡出中: bool,
 }
 
 impl Overlay状态 {
@@ -83,11 +98,40 @@ impl Overlay状态 {
             动作预览: 会话预览::新建(),
             世界动作标签: HashMap::new(),
             已触发手势: false,
+            overlay句柄: None,
+            缓存冻结帧: None,
+            缓存刷新代际: 0,
+            冻结帧: None,
+            冻结帧屏幕原点: None,
+            冻结不透明度: 0.0,
+            冻结淡出中: false,
         }
     }
 
+    pub fn 清除冻结层(&mut self) {
+        self.缓存冻结帧 = None;
+        self.冻结帧 = None;
+        self.冻结帧屏幕原点 = None;
+        self.冻结不透明度 = 0.0;
+        self.冻结淡出中 = false;
+    }
+
+    pub fn 启用显示冻结帧(&mut self) {
+        if let Some(条目) = &self.缓存冻结帧 {
+            self.冻结帧 = Some(条目.图像.as_ref().clone());
+            self.冻结帧屏幕原点 = Some(pos2(条目.屏幕左 as f32, 条目.屏幕上 as f32));
+            self.冻结不透明度 = crate::config::冻结层峰值不透明度;
+            self.冻结淡出中 = true;
+        }
+    }
+
+    pub fn 推进缓存刷新代际(&mut self) -> u64 {
+        self.缓存刷新代际 += 1;
+        self.缓存刷新代际
+    }
+
     pub fn 需要重绘(&self) -> bool {
-        self.显示 || self.需要重定位
+        self.显示 || self.需要重定位 || self.冻结淡出中
     }
 
     pub fn 处理原始事件(&mut self, 事件: 原始鼠标事件) -> Overlay事件结果 {
@@ -102,6 +146,7 @@ impl Overlay状态 {
                 self.动作预览.重置();
                 self.世界动作标签.clear();
                 self.已触发手势 = false;
+                self.清除冻结层();
                 self.轨迹点.clear();
                 if 显示鼠标轨迹 {
                     self.轨迹点.push(点);
@@ -212,6 +257,7 @@ impl Overlay状态 {
         self.动作预览.重置();
         self.世界动作标签.clear();
         self.已触发手势 = false;
+        self.清除冻结层();
         self.需要重定位 = true;
         补发位置
     }

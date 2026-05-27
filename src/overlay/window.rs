@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use eframe::egui::{
     self, pos2, vec2, Color32, FontData, FontDefinitions, FontFamily, Pos2, Rect,
-    Stroke, StrokeKind, Vec2,
+    Stroke, StrokeKind, TextureHandle, Vec2,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, POINT};
@@ -16,8 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
-use crate::config::显示鼠标轨迹;
-use super::animation::{混合颜色, 宫格动画器, 缩放矩形, 绘制标签};
+use crate::config::{显示鼠标轨迹, 冻结层峰值不透明度, 冻结淡出速度};
+use super::animation::{混合颜色, 宫格动画器, 平滑逼近, 缩放矩形, 绘制标签};
 use super::repaint::{Overlay重绘信号, 注册重绘上下文};
 use super::state::{Overlay共享状态, 宫格类型, 隐藏窗口位置, 隐藏窗口大小};
 
@@ -67,6 +67,9 @@ pub fn 运行_overlay窗口(状态: Overlay共享状态, 重绘信号: Overlay�
                 宫格动画: 宫格动画器::新建(),
                 上次显示: false,
                 上次宫格快照: None,
+                冻结纹理: None,
+                冻结帧屏幕原点: None,
+                冻结帧像素大小: None,
             }))
         }),
     ) {
@@ -82,6 +85,9 @@ struct OverlayApp {
     宫格动画: 宫格动画器,
     上次显示: bool,
     上次宫格快照: Option<(i32, i32)>,
+    冻结纹理: Option<TextureHandle>,
+    冻结帧屏幕原点: Option<Pos2>,
+    冻结帧像素大小: Option<[usize; 2]>,
 }
 
 impl eframe::App for OverlayApp {
@@ -100,6 +106,13 @@ impl eframe::App for OverlayApp {
         let Ok(mut 状态) = self.状态.lock() else {
             return;
         };
+
+        if let Some(hwnd) = self.hwnd {
+            let 句柄 = hwnd.0 as isize;
+            if 状态.overlay句柄 != Some(句柄) {
+                状态.overlay句柄 = Some(句柄);
+            }
+        }
 
         if 状态.需要重定位 {
             let 目标范围 = if 状态.显示 {
@@ -125,6 +138,39 @@ impl eframe::App for OverlayApp {
             状态.需要重定位 = false;
         }
 
+        let 帧间隔 = 上下文
+            .input(|输入| 输入.stable_dt)
+            .clamp(0.001, 0.05);
+
+        if let Some(图像) = 状态.冻结帧.take() {
+            let 屏幕原点 = 状态.冻结帧屏幕原点.take();
+            let 像素大小 = 图像.size;
+            self.冻结纹理 = Some(上下文.load_texture(
+                format!("freeze_{}", 上下文.input(|输入| 输入.time)),
+                图像,
+                egui::TextureOptions::NEAREST,
+            ));
+            self.冻结帧屏幕原点 = 屏幕原点;
+            self.冻结帧像素大小 = Some(像素大小);
+            状态.冻结不透明度 = 冻结层峰值不透明度;
+            状态.冻结淡出中 = true;
+            上下文.request_repaint();
+        }
+
+        if 状态.冻结淡出中 {
+            状态.冻结不透明度 =
+                平滑逼近(状态.冻结不透明度, 0.0, 帧间隔, 冻结淡出速度());
+            if 状态.冻结不透明度 < 0.015 {
+                状态.冻结不透明度 = 0.0;
+                状态.冻结淡出中 = false;
+                self.冻结纹理 = None;
+                self.冻结帧屏幕原点 = None;
+                self.冻结帧像素大小 = None;
+            } else {
+                上下文.request_repaint();
+            }
+        }
+
         let 显示 = 状态.显示;
         let 窗口原点 = 状态.窗口原点;
         let 轨迹点 = 状态.轨迹点.clone();
@@ -132,6 +178,7 @@ impl eframe::App for OverlayApp {
         let 宫格列表 = 状态.宫格列表.clone();
         let 悬停宫格 = 状态.悬停宫格;
         let 最近方向 = 状态.最近方向;
+        let 冻结不透明度 = 状态.冻结不透明度;
         drop(状态);
 
         if 显示 && !self.上次显示 {
@@ -141,12 +188,14 @@ impl eframe::App for OverlayApp {
         if !显示 && self.上次显示 {
             self.宫格动画.重置();
             self.上次宫格快照 = None;
+            self.冻结纹理 = None;
+            self.冻结帧屏幕原点 = None;
+            self.冻结帧像素大小 = None;
         }
         self.上次显示 = 显示;
 
         if 显示 {
             let 当前时间 = 上下文.input(|输入| 输入.time);
-            let 帧间隔 = 上下文.input(|输入| 输入.stable_dt).clamp(0.001, 0.05);
             let 当前快照 = 宫格中心坐标;
             if self.上次宫格快照 != Some(当前快照) {
                 self.宫格动画.同步(当前时间, &宫格列表, 最近方向);
@@ -164,6 +213,27 @@ impl eframe::App for OverlayApp {
                 .frame(egui::Frame::NONE)
                 .show(上下文, |ui| {
                     let 画笔 = ui.painter();
+                    let 区域 = ui.max_rect();
+
+                    if let Some(纹理) = &self.冻结纹理 {
+                        if 冻结不透明度 > 0.01 {
+                            if let (Some(屏幕原点), Some(像素大小)) =
+                                (self.冻结帧屏幕原点, self.冻结帧像素大小)
+                            {
+                                绘制对齐冻结层(
+                                    &画笔,
+                                    纹理,
+                                    像素大小,
+                                    屏幕原点,
+                                    窗口原点,
+                                    区域,
+                                    上下文.pixels_per_point(),
+                                    冻结不透明度,
+                                );
+                            }
+                        }
+                    }
+
                     let 偏移 = 窗口原点.to_vec2();
                     let 局部轨迹点: Vec<Pos2> = 轨迹点.iter().map(|点| *点 - 偏移).collect();
 
@@ -209,6 +279,55 @@ impl eframe::App for OverlayApp {
                 });
         }
     }
+}
+
+/// 按截屏窗口屏幕位置 1:1 像素绘制，超出 overlay 客户区的部分裁剪。
+fn 绘制对齐冻结层(
+    画笔: &egui::Painter,
+    纹理: &TextureHandle,
+    像素大小: [usize; 2],
+    截屏屏幕原点: Pos2,
+    overlay屏幕原点: Pos2,
+    裁剪区域: Rect,
+    像素比例: f32,
+    不透明度: f32,
+) {
+    let 宽 = 像素大小[0] as f32;
+    let 高 = 像素大小[1] as f32;
+    if 宽 <= 0.0 || 高 <= 0.0 || 像素比例 <= 0.0 {
+        return;
+    }
+
+    let 目标 = Rect::from_min_size(
+        pos2(
+            (截屏屏幕原点.x - overlay屏幕原点.x) / 像素比例,
+            (截屏屏幕原点.y - overlay屏幕原点.y) / 像素比例,
+        ),
+        vec2(宽 / 像素比例, 高 / 像素比例),
+    );
+
+    let 可见 = 目标.intersect(裁剪区域);
+    if 可见.width() <= 0.0 || 可见.height() <= 0.0 {
+        return;
+    }
+
+    let uv = Rect::from_min_max(
+        pos2(
+            (可见.min.x - 目标.min.x) / 目标.width(),
+            (可见.min.y - 目标.min.y) / 目标.height(),
+        ),
+        pos2(
+            (可见.max.x - 目标.min.x) / 目标.width(),
+            (可见.max.y - 目标.min.y) / 目标.height(),
+        ),
+    );
+
+    画笔.image(
+        纹理.id(),
+        可见,
+        uv,
+        Color32::WHITE.gamma_multiply(不透明度),
+    );
 }
 
 fn 标签字号(标签: Option<&str>) -> f32 {

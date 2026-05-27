@@ -2,7 +2,7 @@
 
 系统级鼠标手势工具（Rust / Windows）。在系统层面监测鼠标按键与轨迹，识别方向并映射为键盘快捷键，控制浏览器 tab 等。
 
-**当前进度**：输入监测、动作模块、egui overlay 九宫格手势 UI 已可用。方向触发已改为 overlay 宫格命中；轨迹距离判断代码保留但不再驱动动作。白名单、Ctrl 按住/松开、真实 tab 数据尚未实现。
+**当前进度**：输入监测、动作模块、egui overlay 九宫格手势 UI 已可用。方向触发已改为 overlay 宫格命中；轨迹距离判断代码保留但不再驱动动作。左/右 tab 切换已接入 PrintWindow 冻结层（快照缓冲 + 像素对齐淡出）。白名单、Ctrl 按住/松开、真实 tab 数据尚未实现。
 
 **当前目标**：在现有 overlay 窗口模型上继续演进 UI（宫格动画、菜单、窗口预览等），不再验证穿透/常驻大窗口方案。
 
@@ -17,6 +17,7 @@
 - [x] 宫格动画：保留格标签 morph、范围外淡出、新格逐个淡入。
 - [x] 方向唯一来源为 overlay 宫格命中；`monitor` 轨迹阈值逻辑保留但不接动作匹配器。
 - [x] 小尺寸隐藏 + 触发放大 + 事件驱动重绘的 overlay 窗口模型。
+- [x] tab 切换冻结层：PrintWindow 快照、延迟缓存、像素对齐绘制、指数淡出。
 
 ## 已确认设计偏好
 
@@ -78,6 +79,7 @@ Hook 线程
 - 右键抬起：关闭浮窗，发送 `方向::结束`；若本会话未触发手势，延迟补发原位置右键单击。
 - 轨迹绘制可选，默认关闭（`config::显示鼠标轨迹`）。
 - 浮窗窗口：空闲 `1x1` 隐藏，手势期间放大到工作区 99%（居中）。
+- tab 冻结层（左/右）：`PrintWindow` 截前台窗口；会话开始与每次方向触发后延迟 50ms 刷新缓存；切 tab 时立即 SendInput，若有缓存则显示快照并按屏幕坐标 1:1 绘制（超出 overlay 裁剪）；指数淡出。配置见 `config.rs`。
 
 ## 关键实现原则
 
@@ -95,6 +97,7 @@ src/
 │   ├── mod.rs       # Overlay 模块入口
 │   ├── state.rs     # 宫格状态、命中检测、世界坐标、方向事件
 │   ├── animation.rs # 宫格进入/退出/标签 morph 动画
+│   ├── capture.rs   # PrintWindow 截屏、延迟缓存刷新
 │   ├── input.rs     # 消费 hook 事件，转发方向到匹配器
 │   ├── repaint.rs   # 跨线程 request_repaint
 │   └── window.rs    # egui 绘制、浅色玻璃样式、Win32 几何切换
@@ -151,6 +154,7 @@ mouse-next/
         ├── mod.rs
         ├── state.rs
         ├── animation.rs
+        ├── capture.rs
         ├── input.rs
         ├── repaint.rs
         └── window.rs
@@ -173,7 +177,7 @@ mouse-next/
 | 文件 | 说明 |
 |------|------|
 | [src/main.rs](src/main.rs) | 入口。创建 channel，启动 Hook / 处理 / 匹配器 / Overlay 输入 / 执行器；主线程运行 egui 浮窗 |
-| [src/config.rs](src/config.rs) | `方向阈值`（基础 100px、水平倍率 2.0）；`显示鼠标轨迹`（默认 false） |
+| [src/config.rs](src/config.rs) | `方向阈值`；`显示鼠标轨迹`；冻结层开关/淡出时长/缓存延迟/峰值不透明度 |
 
 ### src/input/ — 输入监测模块
 
@@ -192,10 +196,11 @@ mouse-next/
 |------|------|
 | [src/overlay/mod.rs](src/overlay/mod.rs) | 导出 `运行_overlay窗口`、`启动_overlay输入` 等 |
 | [src/overlay/state.rs](src/overlay/state.rs) | 九宫格生成、世界坐标、命中检测、动作标签、补发判定 |
-| [src/overlay/animation.rs](src/overlay/animation.rs) | 宫格进入/退出/标签 morph 动画 |
-| [src/overlay/input.rs](src/overlay/input.rs) | 消费原始事件，转发方向到匹配器，调度右键补发 |
+| [src/overlay/animation.rs](src/overlay/animation.rs) | 宫格进入/退出/标签 morph 动画；`平滑逼近` 供淡出复用 |
+| [src/overlay/capture.rs](src/overlay/capture.rs) | `PrintWindow` 截前台窗口；代际号 + 延迟 50ms 刷新缓存 |
+| [src/overlay/input.rs](src/overlay/input.rs) | 消费原始事件，转发方向到匹配器；tab 方向启用冻结层，调度缓存刷新 |
 | [src/overlay/repaint.rs](src/overlay/repaint.rs) | 跨线程 `request_repaint` |
-| [src/overlay/window.rs](src/overlay/window.rs) | egui 绘制、浅色玻璃样式、Win32 窗口几何 |
+| [src/overlay/window.rs](src/overlay/window.rs) | egui 绘制、冻结层像素对齐裁剪、浅色玻璃样式、Win32 窗口几何 |
 
 ### src/action/ — 动作模块
 
