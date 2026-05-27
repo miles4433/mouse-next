@@ -14,3 +14,9 @@ pub enum 方向 {
     左,
     右,
 }
+
+impl 方向 {
+    pub fn 是轨迹方向(self) -> bool {
+        matches!(self, 方向::上 | 方向::下 | 方向::左 | 方向::右)
+    }
+}

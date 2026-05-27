@@ -52,6 +52,10 @@ impl Overlay状态 {
         }
     }
 
+    pub fn 需要重绘(&self) -> bool {
+        self.显示 || self.需要重定位
+    }
+
     pub fn 处理原始事件(&mut self, 事件: 原始鼠标事件) -> Option<&'static str> {
         match 事件 {
             原始鼠标事件::右键按下 { x, y } => {
@@ -91,18 +95,18 @@ impl Overlay状态 {
         }
     }
 
-    pub fn 处理方向(&mut self, 方向: 方向) {
+    pub fn 处理方向(&mut self, 方向: 方向) -> bool {
         if !self.显示 {
-            return;
+            return false;
         }
         self.提示文字 = match 方向 {
-            方向::开始 => "手势开始".to_string(),
-            方向::结束 => String::new(),
             方向::上 => "上".to_string(),
             方向::下 => "下".to_string(),
             方向::左 => "左".to_string(),
             方向::右 => "右".to_string(),
+            _ => return false,
         };
+        true
     }
 
     fn 追加轨迹点(&mut self, 点: Pos2) {

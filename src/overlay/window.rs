@@ -58,7 +58,7 @@ pub fn 运行_overlay窗口(状态: Overlay共享状态, 重绘信号: Overlay�
             Ok(Box::new(OverlayApp {
                 状态,
                 重绘信号,
-                当前范围: Some(初始范围),
+                当前范围: 初始范围,
                 hwnd,
             }))
         }),
@@ -70,7 +70,7 @@ pub fn 运行_overlay窗口(状态: Overlay共享状态, 重绘信号: Overlay�
 struct OverlayApp {
     状态: Overlay共享状态,
     重绘信号: Overlay重绘信号,
-    当前范围: Option<窗口范围>,
+    当前范围: 窗口范围,
     hwnd: Option<HWND>,
 }
 
@@ -106,14 +106,11 @@ impl eframe::App for OverlayApp {
                 隐藏范围()
             };
 
-            if self.当前范围 != Some(目标范围) {
+            if self.当前范围 != 目标范围 {
                 if let Some(hwnd) = self.hwnd {
                     同步窗口范围(hwnd, 目标范围);
                 }
-                上下文.send_viewport_cmd(egui::ViewportCommand::InnerSize(目标范围.大小));
-                上下文.send_viewport_cmd(egui::ViewportCommand::OuterPosition(目标范围.原点));
-                self.当前范围 = Some(目标范围);
-                上下文.request_repaint();
+                self.当前范围 = 目标范围;
             }
             状态.需要重定位 = false;
         }
@@ -131,12 +128,6 @@ impl eframe::App for OverlayApp {
                 .frame(egui::Frame::NONE)
                 .show(上下文, |ui| {
                     let 画笔 = ui.painter();
-                    画笔.rect_filled(
-                        ui.max_rect(),
-                        0.0,
-                        Color32::from_rgba_unmultiplied(255, 120, 120, 52),
-                    );
-
                     let 偏移 = 窗口原点.to_vec2();
                     let 局部轨迹点: Vec<Pos2> = 轨迹点.iter().map(|点| *点 - 偏移).collect();
 
@@ -235,7 +226,6 @@ fn 同步窗口范围(hwnd: HWND, 范围: 窗口范围) {
         );
     }
 }
-
 
 fn 获取显示范围(锚点: Pos2) -> 窗口范围 {
     unsafe {

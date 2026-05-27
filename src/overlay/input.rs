@@ -22,8 +22,7 @@ pub fn 启动_overlay输入(
                 .lock()
                 .map(|mut 状态| {
                     let 待打印 = 状态.处理原始事件(事件);
-                    let 需要重绘 = 状态.显示 || 状态.需要重定位;
-                    (待打印, 需要重绘)
+                    (待打印, 状态.需要重绘())
                 })
                 .unwrap_or((None, false));
             if 需要重绘 {
@@ -35,12 +34,17 @@ pub fn 启动_overlay输入(
         }
     });
 
-    let 方向重绘 = 重绘信号;
     thread::spawn(move || {
         while let Ok(方向) = 方向接收端.recv() {
-            if let Ok(mut 状态) = 状态.lock() {
-                状态.处理方向(方向);
-                请求重绘(&方向重绘);
+            if !方向.是轨迹方向() {
+                continue;
+            }
+            let 需要重绘 = 状态
+                .lock()
+                .map(|mut 状态| 状态.处理方向(方向))
+                .unwrap_or(false);
+            if 需要重绘 {
+                请求重绘(&重绘信号);
             }
         }
     });
