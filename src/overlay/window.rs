@@ -17,9 +17,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::config::{显示鼠标轨迹, 冻结层峰值不透明度, 冻结淡出速度};
-use super::animation::{混合颜色, 宫格动画器, 平滑逼近, 缩放矩形, 绘制标签};
 use super::repaint::{Overlay重绘信号, 注册重绘上下文};
-use super::state::{Overlay共享状态, 宫格类型, 隐藏窗口位置, 隐藏窗口大小};
+use super::state::{
+    Overlay共享状态, 隐藏窗口位置, 隐藏窗口大小, 平滑逼近,
+};
 
 const 默认显示大小: egui::Vec2 = egui::vec2(520.0, 320.0);
 const 显示区域比例: f32 = 0.99;
@@ -64,12 +65,11 @@ pub fn 运行_overlay窗口(状态: Overlay共享状态, 重绘信号: Overlay�
                 重绘信号,
                 当前范围: 初始范围,
                 hwnd,
-                宫格动画: 宫格动画器::新建(),
                 上次显示: false,
-                上次宫格快照: None,
                 冻结纹理: None,
                 冻结帧屏幕原点: None,
                 冻结帧像素大小: None,
+                刚重定位: false,
             }))
         }),
     ) {
@@ -82,12 +82,11 @@ struct OverlayApp {
     重绘信号: Overlay重绘信号,
     当前范围: 窗口范围,
     hwnd: Option<HWND>,
-    宫格动画: 宫格动画器,
     上次显示: bool,
-    上次宫格快照: Option<(i32, i32)>,
     冻结纹理: Option<TextureHandle>,
     冻结帧屏幕原点: Option<Pos2>,
     冻结帧像素大小: Option<[usize; 2]>,
+    刚重定位: bool,
 }
 
 impl eframe::App for OverlayApp {
@@ -108,10 +107,7 @@ impl eframe::App for OverlayApp {
         };
 
         if let Some(hwnd) = self.hwnd {
-            let 句柄 = hwnd.0 as isize;
-            if 状态.overlay句柄 != Some(句柄) {
-                状态.overlay句柄 = Some(句柄);
-            }
+            状态.overlay句柄 = Some(hwnd.0 as isize);
         }
 
         if 状态.需要重定位 {
@@ -134,6 +130,7 @@ impl eframe::App for OverlayApp {
                     同步窗口范围(hwnd, 目标范围);
                 }
                 self.当前范围 = 目标范围;
+                self.刚重定位 = true;
             }
             状态.需要重定位 = false;
         }
@@ -141,12 +138,18 @@ impl eframe::App for OverlayApp {
         let 帧间隔 = 上下文
             .input(|输入| 输入.stable_dt)
             .clamp(0.001, 0.05);
+        let 当前时间 = 上下文.input(|输入| 输入.time);
 
+        if 状态.推进动画(当前时间, 帧间隔) {
+            上下文.request_repaint();
+        }
+
+        // 冻结帧纹理上传
         if let Some(图像) = 状态.冻结帧.take() {
             let 屏幕原点 = 状态.冻结帧屏幕原点.take();
             let 像素大小 = 图像.size;
             self.冻结纹理 = Some(上下文.load_texture(
-                format!("freeze_{}", 上下文.input(|输入| 输入.time)),
+                format!("freeze_{}", 当前时间),
                 图像,
                 egui::TextureOptions::NEAREST,
             ));
@@ -174,20 +177,23 @@ impl eframe::App for OverlayApp {
         let 显示 = 状态.显示;
         let 窗口原点 = 状态.窗口原点;
         let 轨迹点 = 状态.轨迹点.clone();
-        let 宫格中心坐标 = 状态.宫格中心坐标;
-        let 宫格列表 = 状态.宫格列表.clone();
-        let 悬停宫格 = 状态.悬停宫格;
-        let 最近方向 = 状态.最近方向;
         let 冻结不透明度 = 状态.冻结不透明度;
+        let 格子快照: Vec<格绘制快照> = 状态.格子们.iter().map(|格| 格绘制快照 {
+            中心: 格.中心,
+            颜色进度: 格.颜色进度,
+            不透明度: 格.不透明度,
+            是当前格: 格.世界坐标 == 状态.当前坐标,
+        }).collect();
+
         drop(状态);
 
-        if 显示 && !self.上次显示 {
-            self.宫格动画.重置();
-            self.上次宫格快照 = None;
+        if self.刚重定位 {
+            self.刚重定位 = false;
+            上下文.request_repaint();
+            return;
         }
+
         if !显示 && self.上次显示 {
-            self.宫格动画.重置();
-            self.上次宫格快照 = None;
             self.冻结纹理 = None;
             self.冻结帧屏幕原点 = None;
             self.冻结帧像素大小 = None;
@@ -195,20 +201,6 @@ impl eframe::App for OverlayApp {
         self.上次显示 = 显示;
 
         if 显示 {
-            let 当前时间 = 上下文.input(|输入| 输入.time);
-            let 当前快照 = 宫格中心坐标;
-            if self.上次宫格快照 != Some(当前快照) {
-                self.宫格动画.同步(当前时间, &宫格列表, 最近方向);
-                self.上次宫格快照 = Some(当前快照);
-            }
-            if self.宫格动画.更新(当前时间, 帧间隔) {
-                上下文.request_repaint();
-            }
-
-            let 悬停世界坐标 =
-                悬停宫格.and_then(|索引| 宫格列表.get(索引).map(|项| 项.世界坐标));
-            let 绘制列表 = self.宫格动画.绘制列表(当前时间);
-
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(上下文, |ui| {
@@ -235,8 +227,8 @@ impl eframe::App for OverlayApp {
                     }
 
                     let 偏移 = 窗口原点.to_vec2();
-                    let 局部轨迹点: Vec<Pos2> = 轨迹点.iter().map(|点| *点 - 偏移).collect();
 
+                    let 局部轨迹点: Vec<Pos2> = 轨迹点.iter().map(|点| *点 - 偏移).collect();
                     if 显示鼠标轨迹 && 局部轨迹点.len() >= 2 {
                         画笔.add(egui::Shape::line(
                             局部轨迹点.clone(),
@@ -244,44 +236,36 @@ impl eframe::App for OverlayApp {
                         ));
                     }
 
-                    for 参数 in 绘制列表 {
+                    // 按不透明度排序，低的先画
+                    let mut 排序格子 = 格子快照.clone();
+                    排序格子.sort_by(|a, b| {
+                        a.不透明度
+                            .partial_cmp(&b.不透明度)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    for 格 in &排序格子 {
                         let 局部矩形 = Rect::from_min_max(
-                            参数.矩形.min - 偏移,
-                            参数.矩形.max - 偏移,
+                            pos2(格.中心.x - 48.0 - 偏移.x, 格.中心.y - 48.0 - 偏移.y),
+                            pos2(格.中心.x + 48.0 - 偏移.x, 格.中心.y + 48.0 - 偏移.y),
                         );
-                        let 缩放矩形 = 缩放矩形(局部矩形, 参数.缩放);
-                        let 已悬停 = 悬停世界坐标 == Some(参数.世界坐标);
-                        绘制浅色玻璃宫格(
-                            &画笔,
-                            缩放矩形,
-                            参数.类型,
-                            已悬停,
-                            参数.不透明度,
-                        );
-                        if 参数.标签.is_some() || 参数.旧标签.is_some() {
-                            let 文字色 = if 已悬停 && 参数.类型 != 宫格类型::空白 {
-                                混合颜色(Color32::from_rgb(30, 90, 210), 参数.不透明度)
-                            } else {
-                                混合颜色(Color32::from_rgb(40, 45, 55), 参数.不透明度)
-                            };
-                            let 字号 = 标签字号(参数.标签);
-                            绘制标签(
-                                &画笔,
-                                缩放矩形.center(),
-                                参数.旧标签,
-                                参数.标签,
-                                参数.标签变换进度,
-                                字号,
-                                文字色,
-                            );
-                        }
+                        绘制单格(&画笔, 局部矩形, 格.颜色进度, 格.不透明度, 格.是当前格);
                     }
                 });
         }
     }
 }
 
-/// 按截屏窗口屏幕位置 1:1 像素绘制，超出 overlay 客户区的部分裁剪。
+#[derive(Clone)]
+struct 格绘制快照 {
+    中心: Pos2,
+    颜色进度: f32,
+    不透明度: f32,
+    是当前格: bool,
+}
+
+// ── 绘制 ──
+
 fn 绘制对齐冻结层(
     画笔: &egui::Painter,
     纹理: &TextureHandle,
@@ -330,80 +314,58 @@ fn 绘制对齐冻结层(
     );
 }
 
-fn 标签字号(标签: Option<&str>) -> f32 {
-    match 标签.map(|文字| 文字.chars().count()).unwrap_or(0) {
-        0 | 1 => 28.0,
-        _ => 20.0,
+fn 绘制单格(画笔: &egui::Painter, 矩形: Rect, 颜色进度: f32, 不透明度: f32, 是当前格: bool) {
+    if 不透明度 < 0.005 {
+        return;
     }
-}
 
-fn 绘制浅色玻璃宫格(
-    画笔: &egui::Painter,
-    矩形: Rect,
-    类型: 宫格类型,
-    已悬停: bool,
-    不透明度: f32,
-) {
-    let 是空白 = 类型 == 宫格类型::空白;
-    let 是中心 = 类型 == 宫格类型::中心;
-    let 可交互 = !是空白 && !是中心;
-
-    let 阴影 = 矩形.translate(vec2(0.0, 1.5)).expand(0.5);
-    画笔.rect_filled(
-        阴影,
-        宫格圆角,
-        混合颜色(Color32::from_rgba_unmultiplied(0, 0, 0, 18), 不透明度),
-    );
-
-    let 填充 = if 已悬停 && 可交互 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 118)
-    } else if 是中心 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 92)
-    } else if 是空白 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+    // iOS 绿色 #34C759
+    let 绿 = Color32::from_rgb(52, 199, 89);
+    // 当前格白底，左右格浅灰底
+    let 白底 = if 是当前格 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 230)
     } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 72)
+        Color32::from_rgba_unmultiplied(242, 242, 247, 200)
     };
-    画笔.rect_filled(矩形, 宫格圆角, 混合颜色(填充, 不透明度));
 
-    if !是空白 {
-        let 高光条 = Rect::from_min_max(
-            pos2(矩形.min.x + 8.0, 矩形.min.y + 5.0),
-            pos2(矩形.max.x - 8.0, 矩形.min.y + 6.5),
-        );
-        画笔.rect_filled(
-            高光条,
-            1.0,
-            混合颜色(Color32::from_rgba_unmultiplied(255, 255, 255, 90), 不透明度),
-        );
-    }
+    let 填充色 = lerp_color32(绿, 白底, 1.0 - 颜色进度);
+    let 最终填充 = alpha_color(填充色, 不透明度);
+    画笔.rect_filled(矩形, 宫格圆角, 最终填充);
 
-    let 边框 = if 已悬停 && 可交互 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 200)
-    } else if 是空白 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 45)
+    // 边框：当前格微微灰边，左右格更淡
+    let 边框色 = if 是当前格 {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 25)
     } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 130)
+        Color32::from_rgba_unmultiplied(0, 0, 0, 12)
     };
     画笔.rect_stroke(
         矩形,
         宫格圆角,
-        Stroke::new(if 已悬停 && 可交互 { 1.2 } else { 0.75 }, 混合颜色(边框, 不透明度)),
-        StrokeKind::Outside,
+        Stroke::new(if 是当前格 { 0.8 } else { 0.5 }, alpha_color(边框色, 不透明度)),
+        StrokeKind::Inside,
     );
-
-    if 已悬停 && 可交互 {
-        画笔.rect_stroke(
-            矩形.shrink(3.0),
-            宫格圆角 - 3.0,
-            Stroke::new(
-                1.0,
-                混合颜色(Color32::from_rgba_unmultiplied(80, 150, 255, 90), 不透明度),
-            ),
-            StrokeKind::Inside,
-        );
-    }
 }
+
+fn alpha_color(颜色: Color32, 不透明度: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        颜色.r(),
+        颜色.g(),
+        颜色.b(),
+        (颜色.a() as f32 * 不透明度).round() as u8,
+    )
+}
+
+fn lerp_color32(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    Color32::from_rgba_unmultiplied(
+        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8,
+        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8,
+        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
+        (a.a() as f32 + (b.a() as f32 - a.a() as f32) * t) as u8,
+    )
+}
+
+// ── 窗口管理 ──
 
 fn 设置窗口不抢焦点(创建上下文: &eframe::CreationContext<'_>) -> Option<HWND> {
     let Ok(窗口句柄) = 创建上下文.window_handle() else {
