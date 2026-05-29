@@ -3,13 +3,12 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{pos2, vec2, ColorImage, Pos2, Rect};
 
 use crate::action::会话预览;
-use crate::config::{显示鼠标轨迹, 格边长, 格步长};
+use crate::config::{格边长, 格步长};
 use crate::input::{原始鼠标事件, 方向};
 
 pub const 隐藏窗口大小: eframe::egui::Vec2 = eframe::egui::vec2(1.0, 1.0);
 pub const 隐藏窗口位置: Pos2 = pos2(0.0, 0.0);
 
-const 采样距离: f32 = 2.0;
 const 格过渡速度: f32 = 4.0;
 const 颜色褪色速度: f32 = 2.5;
 const 不透明度速度: f32 = 3.5;
@@ -49,7 +48,6 @@ pub struct Overlay状态 {
     pub 显示: bool,
     pub 锚点: Option<Pos2>,
     pub 窗口原点: Pos2,
-    pub 轨迹点: Vec<Pos2>,
 
     /// 当前中心格的世界坐标
     pub 当前坐标: (i32, i32),
@@ -83,7 +81,6 @@ impl Overlay状态 {
             显示: false,
             锚点: None,
             窗口原点: 隐藏窗口位置,
-            轨迹点: Vec::new(),
             当前坐标: (0, 0),
             当前中心: Pos2::ZERO,
             格子们: Vec::new(),
@@ -143,10 +140,6 @@ impl Overlay状态 {
                 self.动作预览.重置();
                 self.已触发手势 = false;
                 self.清除冻结层();
-                self.轨迹点.clear();
-                if 显示鼠标轨迹 {
-                    self.轨迹点.push(点);
-                }
                 self.重建三格();
                 self.需要重定位 = true;
                 Overlay事件结果::会话开始
@@ -157,18 +150,11 @@ impl Overlay状态 {
                 }
                 let 点 = pos2(x as f32, y as f32);
                 self.鼠标位置 = 点;
-                if 显示鼠标轨迹 {
-                    self.追加轨迹点(点);
-                }
                 self.检测邻格进入(点)
             }
-            原始鼠标事件::右键抬起 { x, y } => {
+            原始鼠标事件::右键抬起 { x: _, y: _ } => {
                 if !self.显示 {
                     return Overlay事件结果::无;
-                }
-                let 点 = pos2(x as f32, y as f32);
-                if 显示鼠标轨迹 {
-                    self.追加轨迹点(点);
                 }
                 let 补发位置 = self.关闭();
                 Overlay事件结果::会话结束 { 补发位置 }
@@ -214,16 +200,6 @@ impl Overlay状态 {
 // ── 内部辅助 ──
 
 impl Overlay状态 {
-    fn 追加轨迹点(&mut self, 点: Pos2) {
-        if let Some(最后点) = self.轨迹点.last_mut() {
-            if 最后点.distance(点) < 采样距离 {
-                *最后点 = 点;
-                return;
-            }
-        }
-        self.轨迹点.push(点);
-    }
-
     /// 根据当前坐标重建左/中/右三格（初始状态，无动画）
     fn 重建三格(&mut self) {
         self.格子们.clear();

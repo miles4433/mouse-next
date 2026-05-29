@@ -2,11 +2,11 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
 use crate::action::registry::默认动作列表;
-use crate::action::types::{动作, 动作类型, 待执行动作, 是轨迹方向};
+use crate::action::types::{动作, 动作类型, 待执行动作};
 use crate::input::方向;
 
 pub struct 匹配器 {
-    轨迹队列: Vec<方向>,
+    方向队列: Vec<方向>,
     动作列表: Vec<动作>,
     执行发送端: Sender<待执行动作>,
     会话中: bool,
@@ -16,7 +16,7 @@ pub struct 匹配器 {
 impl 匹配器 {
     pub fn 新建(执行发送端: Sender<待执行动作>) -> Self {
         Self {
-            轨迹队列: Vec::new(),
+            方向队列: Vec::new(),
             动作列表: 默认动作列表(),
             执行发送端,
             会话中: false,
@@ -29,18 +29,18 @@ impl 匹配器 {
             方向::开始 => {
                 self.会话中 = true;
                 self.已锁定 = false;
-                self.轨迹队列.clear();
+                self.方向队列.clear();
             }
             方向::结束 => {
                 self.会话中 = false;
                 self.已锁定 = false;
-                self.轨迹队列.clear();
+                self.方向队列.clear();
             }
-            d if 是轨迹方向(d) => {
+            d if d.是步进方向() => {
                 if !self.会话中 || self.已锁定 {
                     return;
                 }
-                self.轨迹队列.push(d);
+                self.方向队列.push(d);
                 self.尝试匹配();
             }
             _ => {}
@@ -48,19 +48,19 @@ impl 匹配器 {
     }
 
     fn 尝试匹配(&mut self) {
-        self.轨迹队列.dedup();
+        self.方向队列.dedup();
 
         loop {
-            if self.轨迹队列.is_empty() {
+            if self.方向队列.is_empty() {
                 break;
             }
 
             let 队首是有效起点 = self
                 .动作列表
                 .iter()
-                .any(|动作| 动作.轨迹.first() == self.轨迹队列.first());
+                .any(|动作| 动作.触发序列.first() == self.方向队列.first());
             if !队首是有效起点 {
-                self.轨迹队列.remove(0);
+                self.方向队列.remove(0);
                 continue;
             }
 
@@ -70,15 +70,15 @@ impl 匹配器 {
                 if 等待独占补全 && 动作.类型 == 动作类型::重复 {
                     return false;
                 }
-                队列以前缀匹配(&self.轨迹队列, &动作.轨迹)
+                队列以前缀匹配(&self.方向队列, &动作.触发序列)
             }) {
-                let 长度 = 动作.轨迹.len();
+                let 长度 = 动作.触发序列.len();
                 let 类型 = 动作.类型;
-                self.轨迹队列.drain(0..长度);
+                self.方向队列.drain(0..长度);
                 let _ = self.执行发送端.send(动作.按键.clone());
                 if 类型 == 动作类型::独占 {
                     self.已锁定 = true;
-                    self.轨迹队列.clear();
+                    self.方向队列.clear();
                 }
                 continue;
             }
@@ -90,8 +90,8 @@ impl 匹配器 {
     fn 等待独占补全(&self) -> bool {
         self.动作列表.iter().any(|动作| {
             动作.类型 == 动作类型::独占
-                && 动作.轨迹.len() > self.轨迹队列.len()
-                && 动作.轨迹.starts_with(&self.轨迹队列)
+                && 动作.触发序列.len() > self.方向队列.len()
+                && 动作.触发序列.starts_with(&self.方向队列)
         })
     }
 }
@@ -193,10 +193,10 @@ mod tests {
         匹配器.处理方向(方向::上);
 
         assert!(执行接收端.try_recv().is_err());
-        assert_eq!(匹配器.轨迹队列, vec![方向::上]);
+        assert_eq!(匹配器.方向队列, vec![方向::上]);
 
         匹配器.处理方向(方向::结束);
-        assert!(匹配器.轨迹队列.is_empty());
+        assert!(匹配器.方向队列.is_empty());
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod tests {
 
         assert_eq!(执行接收端.try_recv().unwrap(), 右滑动作());
         assert!(执行接收端.try_recv().is_err());
-        assert!(匹配器.轨迹队列.is_empty());
+        assert!(匹配器.方向队列.is_empty());
     }
 
     #[test]

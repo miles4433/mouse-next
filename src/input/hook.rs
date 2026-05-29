@@ -15,17 +15,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::types::原始鼠标事件;
 
 thread_local! {
-    static 原始事件发送端: RefCell<Vec<Sender<原始鼠标事件>>> = const { RefCell::new(Vec::new()) };
+    static 原始事件发送端: RefCell<Option<Sender<原始鼠标事件>>> = const { RefCell::new(None) };
 }
 
-pub fn 启动_hook(
-    处理器发送端: Sender<原始鼠标事件>,
-    overlay发送端: Sender<原始鼠标事件>,
-    停止: Arc<AtomicBool>,
-) {
+pub fn 启动_hook(overlay发送端: Sender<原始鼠标事件>, 停止: Arc<AtomicBool>) {
     thread::spawn(move || {
         原始事件发送端.with(|槽| {
-            *槽.borrow_mut() = vec![处理器发送端, overlay发送端];
+            *槽.borrow_mut() = Some(overlay发送端);
         });
 
         let hook = unsafe { 安装_hook() };
@@ -88,7 +84,7 @@ unsafe extern "system" fn 鼠标_hook回调(
 
     if let Some(事件) = 事件 {
         原始事件发送端.with(|槽| {
-            for 发送端 in 槽.borrow().iter() {
+            if let Some(发送端) = 槽.borrow().as_ref() {
                 let _ = 发送端.send(事件);
             }
         });

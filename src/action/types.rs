@@ -20,11 +20,7 @@ pub enum 动作类型 {
 pub struct 动作 {
     pub 名称: &'static str,
     pub 快捷键: &'static str,
-    pub 轨迹: Vec<方向>,
+    pub 触发序列: Vec<方向>,
     pub 按键: 待执行动作,
     pub 类型: 动作类型,
-}
-
-pub fn 是轨迹方向(方向: 方向) -> bool {
-    matches!(方向, 方向::上 | 方向::下 | 方向::左 | 方向::右)
 }

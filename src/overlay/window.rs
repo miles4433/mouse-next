@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
-use crate::config::{显示鼠标轨迹, 冻结层峰值不透明度, 冻结淡出速度};
+use crate::config::{冻结层峰值不透明度, 冻结淡出速度};
 use super::repaint::{Overlay重绘信号, 注册重绘上下文};
 use super::state::{
     Overlay共享状态, 隐藏窗口位置, 隐藏窗口大小, 平滑逼近,
@@ -176,7 +176,6 @@ impl eframe::App for OverlayApp {
 
         let 显示 = 状态.显示;
         let 窗口原点 = 状态.窗口原点;
-        let 轨迹点 = 状态.轨迹点.clone();
         let 冻结不透明度 = 状态.冻结不透明度;
         let 格子快照: Vec<格绘制快照> = 状态.格子们.iter().map(|格| 格绘制快照 {
             中心: 格.中心,
@@ -227,14 +226,6 @@ impl eframe::App for OverlayApp {
                     }
 
                     let 偏移 = 窗口原点.to_vec2();
-
-                    let 局部轨迹点: Vec<Pos2> = 轨迹点.iter().map(|点| *点 - 偏移).collect();
-                    if 显示鼠标轨迹 && 局部轨迹点.len() >= 2 {
-                        画笔.add(egui::Shape::line(
-                            局部轨迹点.clone(),
-                            Stroke::new(2.0, Color32::from_white_alpha(140)),
-                        ));
-                    }
 
                     // 按不透明度排序，低的先画
                     let mut 排序格子 = 格子快照.clone();
