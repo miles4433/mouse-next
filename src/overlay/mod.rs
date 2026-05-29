@@ -1,4 +1,3 @@
-mod animation;
 mod capture;
 mod input;
 mod repaint;

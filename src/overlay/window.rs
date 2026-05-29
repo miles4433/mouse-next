@@ -16,11 +16,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
-use crate::config::{冻结层峰值不透明度, 冻结淡出速度};
+use crate::action::{槽显示状态, 格符号, 显示级别};
+use crate::config::{格边长, 冻结层峰值不透明度, 冻结淡出速度};
 use super::repaint::{Overlay重绘信号, 注册重绘上下文};
-use super::state::{
-    Overlay共享状态, 隐藏窗口位置, 隐藏窗口大小, 平滑逼近,
-};
+use super::state::{Overlay共享状态, 隐藏窗口位置, 隐藏窗口大小, 平滑逼近};
 
 const 默认显示大小: egui::Vec2 = egui::vec2(520.0, 320.0);
 const 显示区域比例: f32 = 0.99;
@@ -177,12 +176,21 @@ impl eframe::App for OverlayApp {
         let 显示 = 状态.显示;
         let 窗口原点 = 状态.窗口原点;
         let 冻结不透明度 = 状态.冻结不透明度;
-        let 格子快照: Vec<格绘制快照> = 状态.格子们.iter().map(|格| 格绘制快照 {
-            中心: 格.中心,
-            颜色进度: 格.颜色进度,
-            不透明度: 格.不透明度,
-            是当前格: 格.世界坐标 == 状态.当前坐标,
-        }).collect();
+        let 当前层 = 状态.当前层;
+        let 队列 = 状态.步进队列.clone();
+        let 悬停槽 = 状态.当前槽;
+        let 格子快照: Vec<格绘制快照> = 状态
+            .格子们
+            .iter()
+            .map(|格| {
+                let 显示 = 槽显示状态(当前层, &队列, 悬停槽, 格.槽);
+                格绘制快照 {
+                    中心: 格.中心,
+                    颜色进度: 格.颜色进度,
+                    显示,
+                }
+            })
+            .collect();
 
         drop(状态);
 
@@ -226,21 +234,14 @@ impl eframe::App for OverlayApp {
                     }
 
                     let 偏移 = 窗口原点.to_vec2();
+                    let 半 = 格边长 / 2.0;
 
-                    // 按不透明度排序，低的先画
-                    let mut 排序格子 = 格子快照.clone();
-                    排序格子.sort_by(|a, b| {
-                        a.不透明度
-                            .partial_cmp(&b.不透明度)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-
-                    for 格 in &排序格子 {
+                    for 格 in &格子快照 {
                         let 局部矩形 = Rect::from_min_max(
-                            pos2(格.中心.x - 48.0 - 偏移.x, 格.中心.y - 48.0 - 偏移.y),
-                            pos2(格.中心.x + 48.0 - 偏移.x, 格.中心.y + 48.0 - 偏移.y),
+                            pos2(格.中心.x - 半 - 偏移.x, 格.中心.y - 半 - 偏移.y),
+                            pos2(格.中心.x + 半 - 偏移.x, 格.中心.y + 半 - 偏移.y),
                         );
-                        绘制单格(&画笔, 局部矩形, 格.颜色进度, 格.不透明度, 格.是当前格);
+                        绘制单格(&画笔, 局部矩形, &格.显示, 格.颜色进度, 上下文);
                     }
                 });
         }
@@ -251,8 +252,7 @@ impl eframe::App for OverlayApp {
 struct 格绘制快照 {
     中心: Pos2,
     颜色进度: f32,
-    不透明度: f32,
-    是当前格: bool,
+    显示: crate::action::格显示,
 }
 
 // ── 绘制 ──
@@ -305,36 +305,81 @@ fn 绘制对齐冻结层(
     );
 }
 
-fn 绘制单格(画笔: &egui::Painter, 矩形: Rect, 颜色进度: f32, 不透明度: f32, 是当前格: bool) {
-    if 不透明度 < 0.005 {
+fn 符号文字(符号: 格符号) -> &'static str {
+    match 符号 {
+        格符号::左 => "←",
+        格符号::右 => "→",
+        格符号::上 => "↑",
+        格符号::下 => "↓",
+        格符号::关闭 => "×",
+        格符号::恢复 => "↩",
+        格符号::空 => "",
+    }
+}
+
+fn 绘制单格(
+    画笔: &egui::Painter,
+    矩形: Rect,
+    显示: &crate::action::格显示,
+    颜色进度: f32,
+    上下文: &egui::Context,
+) {
+    let 基础不透明 = match 显示.显示级别 {
+        显示级别::空角弱显 => 0.35,
+        显示级别::常显 => 1.0,
+    };
+    if 基础不透明 < 0.01 {
         return;
     }
 
-    // iOS 绿色 #34C759
     let 绿 = Color32::from_rgb(52, 199, 89);
-    // 当前格白底，左右格浅灰底
-    let 白底 = if 是当前格 {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 230)
+    let 白底 = if 显示.悬停 {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 240)
     } else {
         Color32::from_rgba_unmultiplied(242, 242, 247, 200)
     };
 
     let 填充色 = lerp_color32(绿, 白底, 1.0 - 颜色进度);
-    let 最终填充 = alpha_color(填充色, 不透明度);
+    let 最终填充 = alpha_color(填充色, 基础不透明);
     画笔.rect_filled(矩形, 宫格圆角, 最终填充);
 
-    // 边框：当前格微微灰边，左右格更淡
-    let 边框色 = if 是当前格 {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 25)
-    } else {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 12)
-    };
+    let 边框宽 = if 显示.悬停 { 1.2 } else { 0.6 };
+    let 边框色 = Color32::from_rgba_unmultiplied(0, 0, 0, if 显示.悬停 { 40 } else { 18 });
     画笔.rect_stroke(
         矩形,
         宫格圆角,
-        Stroke::new(if 是当前格 { 0.8 } else { 0.5 }, alpha_color(边框色, 不透明度)),
+        Stroke::new(边框宽, alpha_color(边框色, 基础不透明)),
         StrokeKind::Inside,
     );
+
+    let 文案 = 显示
+        .标签
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| 符号文字(显示.符号).to_string());
+    if !文案.is_empty() {
+        let 字号 = 22.0;
+        画笔.text(
+            矩形.center(),
+            egui::Align2::CENTER_CENTER,
+            文案,
+            egui::FontId::proportional(字号),
+            alpha_color(Color32::from_rgb(30, 30, 30), 基础不透明),
+        );
+    }
+
+    if 显示.锁定 {
+        let 锁字号 = 14.0;
+        let 锁位置 = pos2(矩形.max.x - 10.0, 矩形.min.y + 12.0);
+        画笔.text(
+            锁位置,
+            egui::Align2::CENTER_CENTER,
+            "🔒",
+            egui::FontId::proportional(锁字号),
+            alpha_color(Color32::from_rgb(120, 120, 120), 0.85),
+        );
+    }
+
+    let _ = 上下文;
 }
 
 fn alpha_color(颜色: Color32, 不透明度: f32) -> Color32 {

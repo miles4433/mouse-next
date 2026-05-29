@@ -1,28 +1,33 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use eframe::egui::{pos2, vec2, ColorImage, Pos2, Rect};
+use eframe::egui::{pos2, ColorImage, Pos2};
 
-use crate::action::会话预览;
-use crate::config::{格边长, 格步长};
-use crate::input::{原始鼠标事件, 方向};
+use crate::action::{
+    处理进入槽, 命中槽, 匹配松手动作, 匹配触碰动作, 同槽重复动作, 全部槽位, 宫格事件, 宫格槽, 层,
+    槽位中心, 槽离开需截屏,
+};
 
 pub const 隐藏窗口大小: eframe::egui::Vec2 = eframe::egui::vec2(1.0, 1.0);
 pub const 隐藏窗口位置: Pos2 = pos2(0.0, 0.0);
 
-const 格过渡速度: f32 = 4.0;
 const 颜色褪色速度: f32 = 2.5;
-const 不透明度速度: f32 = 3.5;
 
 pub type Overlay共享状态 = Arc<Mutex<Overlay状态>>;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Overlay事件结果 {
     无,
     会话开始,
     会话结束 {
         补发位置: Option<Pos2>,
     },
-    方向(方向),
+    转发(宫格事件),
+    离格截屏,
+    会话结束流程 {
+        松手: Option<宫格事件>,
+        补发位置: Option<Pos2>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -32,15 +37,11 @@ pub struct 冻结缓存条目 {
     pub 屏幕上: i32,
 }
 
-/// 单个可见格子的动画状态
 #[derive(Debug, Clone)]
 pub struct 格动画 {
-    pub 世界坐标: (i32, i32),
-    pub 中心: Pos2,         // 当前屏幕位置（动画过渡中）
-    pub 目标中心: Pos2,
-    pub 颜色进度: f32,      // 1=激活色, 0=白色
-    pub 不透明度: f32,
-    pub 目标不透明度: f32,
+    pub 槽: 宫格槽,
+    pub 中心: Pos2,
+    pub 颜色进度: f32,
 }
 
 #[derive(Debug)]
@@ -48,20 +49,15 @@ pub struct Overlay状态 {
     pub 显示: bool,
     pub 锚点: Option<Pos2>,
     pub 窗口原点: Pos2,
-
-    /// 当前中心格的世界坐标
-    pub 当前坐标: (i32, i32),
-    /// 当前中心格的屏幕位置（用于计算邻格位置）
-    pub 当前中心: Pos2,
-
-    /// 活跃的可见格子（用于渲染和动画）
+    pub 当前层: 层,
+    pub 步进队列: Vec<(层, 宫格槽)>,
+    pub 当前槽: Option<宫格槽>,
+    pub 上次槽: Option<宫格槽>,
     pub 格子们: Vec<格动画>,
-
     pub 需要重定位: bool,
-    动作预览: 会话预览,
-    已触发手势: bool,
+    pub 已触发手势: bool,
     pub 鼠标位置: Pos2,
-
+    pub 面板会话中: Arc<AtomicBool>,
     pub overlay句柄: Option<isize>,
     pub 缓存冻结帧: Option<Arc<冻结缓存条目>>,
     pub 缓存刷新代际: u64,
@@ -72,22 +68,24 @@ pub struct Overlay状态 {
 }
 
 impl Overlay状态 {
-    pub fn 新建共享() -> Overlay共享状态 {
-        Arc::new(Mutex::new(Self::默认()))
+    pub fn 新建共享(面板会话中: Arc<AtomicBool>) -> Overlay共享状态 {
+        Arc::new(Mutex::new(Self::默认(面板会话中)))
     }
 
-    pub fn 默认() -> Self {
+    pub fn 默认(面板会话中: Arc<AtomicBool>) -> Self {
         Self {
             显示: false,
             锚点: None,
             窗口原点: 隐藏窗口位置,
-            当前坐标: (0, 0),
-            当前中心: Pos2::ZERO,
+            当前层: 0,
+            步进队列: Vec::new(),
+            当前槽: None,
+            上次槽: None,
             格子们: Vec::new(),
-            需要重定位: false,
-            动作预览: 会话预览::新建(),
+            需要重定位: true,
             已触发手势: false,
             鼠标位置: Pos2::ZERO,
+            面板会话中,
             overlay句柄: None,
             缓存冻结帧: None,
             缓存刷新代际: 0,
@@ -124,65 +122,160 @@ impl Overlay状态 {
         self.显示 || self.需要重定位 || self.冻结淡出中
     }
 
-    pub fn 当前格矩形(&self) -> Rect {
-        Rect::from_center_size(self.当前中心, vec2(格边长, 格边长))
-    }
-
-    pub fn 处理原始事件(&mut self, 事件: 原始鼠标事件) -> Overlay事件结果 {
+    pub fn 处理原始事件(&mut self, 事件: crate::input::原始鼠标事件) -> Overlay事件结果 {
         match 事件 {
-            原始鼠标事件::右键按下 { x, y } => {
+            crate::input::原始鼠标事件::右键按下 { x, y } => {
                 let 点 = pos2(x as f32, y as f32);
                 self.显示 = true;
+                self.面板会话中.store(true, Ordering::Relaxed);
                 self.锚点 = Some(点);
                 self.鼠标位置 = 点;
-                self.当前坐标 = (0, 0);
-                self.当前中心 = 点;
-                self.动作预览.重置();
+                self.当前层 = 0;
+                self.步进队列.clear();
+                self.当前槽 = None;
+                self.上次槽 = None;
                 self.已触发手势 = false;
                 self.清除冻结层();
-                self.重建三格();
+                self.重建九宫格(点);
                 self.需要重定位 = true;
                 Overlay事件结果::会话开始
             }
-            原始鼠标事件::鼠标移动 { x, y } => {
+            crate::input::原始鼠标事件::鼠标移动 { x, y } => {
                 if !self.显示 {
                     return Overlay事件结果::无;
                 }
                 let 点 = pos2(x as f32, y as f32);
                 self.鼠标位置 = 点;
-                self.检测邻格进入(点)
+                self.处理槽变化(点)
             }
-            原始鼠标事件::右键抬起 { x: _, y: _ } => {
+            crate::input::原始鼠标事件::左键按下 { x, y } => {
                 if !self.显示 {
                     return Overlay事件结果::无;
                 }
+                let 点 = pos2(x as f32, y as f32);
+                self.鼠标位置 = 点;
+                let 锚点 = self.锚点.unwrap_or(点);
+                if let Some(槽) = 命中槽(锚点, 点) {
+                    if 同槽重复动作(self.当前层, 槽).is_some() {
+                        self.已触发手势 = true;
+                        if let Some(格) = self.格子们.iter_mut().find(|格| 格.槽 == 槽) {
+                            格.颜色进度 = 1.0;
+                        }
+                        return Overlay事件结果::转发(宫格事件::同槽重复(槽));
+                    }
+                }
+                Overlay事件结果::无
+            }
+            crate::input::原始鼠标事件::右键抬起 { x: _, y: _ } => {
+                if !self.显示 {
+                    return Overlay事件结果::无;
+                }
+                let 松手 = self.当前槽.and_then(|槽| {
+                    if 匹配松手动作(&self.步进队列).is_some() {
+                        self.已触发手势 = true;
+                        Some(宫格事件::松手 {
+                            槽,
+                            层: self.当前层,
+                            队列: self.步进队列.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                });
                 let 补发位置 = self.关闭();
-                Overlay事件结果::会话结束 { 补发位置 }
+                Overlay事件结果::会话结束流程 {
+                    松手,
+                    补发位置,
+                }
             }
         }
     }
 
-    /// 推进动画：位置过渡、颜色衰减、不透明度过渡
+    fn 关闭(&mut self) -> Option<Pos2> {
+        let 补发位置 = if self.已触发手势 {
+            None
+        } else {
+            self.锚点
+        };
+        self.显示 = false;
+        self.面板会话中.store(false, Ordering::Relaxed);
+        self.锚点 = None;
+        self.当前层 = 0;
+        self.步进队列.clear();
+        self.当前槽 = None;
+        self.上次槽 = None;
+        self.格子们.clear();
+        self.已触发手势 = false;
+        self.清除冻结层();
+        self.需要重定位 = true;
+        补发位置
+    }
+
+    fn 重建九宫格(&mut self, 锚点: Pos2) {
+        self.格子们 = 全部槽位()
+            .iter()
+            .map(|项| 格动画 {
+                槽: 项.槽,
+                中心: 槽位中心(锚点, 项.槽),
+                颜色进度: 0.0,
+            })
+            .collect();
+    }
+
+    fn 处理槽变化(&mut self, 点: Pos2) -> Overlay事件结果 {
+        let 锚点 = match self.锚点 {
+            Some(锚) => 锚,
+            None => return Overlay事件结果::无,
+        };
+        let 新槽 = 命中槽(锚点, 点);
+        if 新槽 == self.当前槽 {
+            return Overlay事件结果::无;
+        }
+
+        let mut 结果 = Overlay事件结果::无;
+
+        if let Some(旧) = self.当前槽 {
+            if 槽离开需截屏(旧) {
+                结果 = Overlay事件结果::离格截屏;
+            }
+        }
+
+        self.上次槽 = self.当前槽;
+        self.当前槽 = 新槽;
+
+        let Some(槽) = 新槽 else {
+            return 结果;
+        };
+
+        if let Some(新层) = 处理进入槽(self.当前层, &mut self.步进队列, 槽) {
+            self.当前层 = 新层;
+            if let Some(格) = self.格子们.iter_mut().find(|格| 格.槽 == 槽) {
+                格.颜色进度 = 1.0;
+            }
+            self.已触发手势 = true;
+            let 进入事件 = 宫格事件::进入 {
+                槽,
+                层: self.当前层,
+                队列: self.步进队列.clone(),
+            };
+            if 匹配触碰动作(&self.步进队列).is_some() {
+                return Overlay事件结果::转发(进入事件);
+            }
+            if 结果 != Overlay事件结果::无 {
+                return 结果;
+            }
+            return Overlay事件结果::转发(进入事件);
+        }
+
+        结果
+    }
+
     pub fn 推进动画(&mut self, _当前时间: f64, 帧间隔: f32) -> bool {
         if !self.显示 {
             return false;
         }
         let mut 活跃 = false;
         for 格 in &mut self.格子们 {
-            // 不透明度
-            if (格.不透明度 - 格.目标不透明度).abs() > 0.001 {
-                格.不透明度 = 平滑逼近(格.不透明度, 格.目标不透明度, 帧间隔, 不透明度速度);
-                活跃 = true;
-            }
-            // 位置
-            if 格.中心.distance(格.目标中心) > 0.3 {
-                格.中心 = pos2(
-                    平滑逼近(格.中心.x, 格.目标中心.x, 帧间隔, 格过渡速度),
-                    平滑逼近(格.中心.y, 格.目标中心.y, 帧间隔, 格过渡速度),
-                );
-                活跃 = true;
-            }
-            // 颜色衰减
             if 格.颜色进度 > 0.001 {
                 格.颜色进度 = 平滑逼近(格.颜色进度, 0.0, 帧间隔, 颜色褪色速度);
                 if 格.颜色进度 < 0.003 {
@@ -191,144 +284,9 @@ impl Overlay状态 {
                 活跃 = true;
             }
         }
-        // 清理完全透明的格子
-        self.格子们.retain(|格| 格.不透明度 > 0.005 || 格.目标不透明度 > 0.005);
         活跃
     }
 }
-
-// ── 内部辅助 ──
-
-impl Overlay状态 {
-    /// 根据当前坐标重建左/中/右三格（初始状态，无动画）
-    fn 重建三格(&mut self) {
-        self.格子们.clear();
-        let 步长 = 格步长;
-        for (dx, 是世界坐标) in [
-            (-1, (self.当前坐标.0 - 1, self.当前坐标.1)),
-            (0, self.当前坐标),
-            (1, (self.当前坐标.0 + 1, self.当前坐标.1)),
-        ] {
-            let 目标 = self.当前中心 + vec2(dx as f32 * 步长, 0.0);
-            self.格子们.push(格动画 {
-                世界坐标: 是世界坐标,
-                中心: 目标,
-                目标中心: 目标,
-                颜色进度: 0.0,
-                不透明度: if dx == 0 { 1.0 } else { 0.55 },
-                目标不透明度: if dx == 0 { 1.0 } else { 0.55 },
-            });
-        }
-    }
-
-    fn 检测邻格进入(&mut self, 点: Pos2) -> Overlay事件结果 {
-        // 先检测左右邻格（有视觉反馈）
-        let 步长 = 格步长;
-        let 边长 = 格边长;
-
-        // 左邻格
-        let 左中心 = self.当前中心 + vec2(-步长, 0.0);
-        let 左矩形 = Rect::from_center_size(左中心, vec2(边长, 边长));
-        if 左矩形.contains(点) {
-            return self.方向触发(方向::左);
-        }
-
-        // 右邻格
-        let 右中心 = self.当前中心 + vec2(步长, 0.0);
-        let 右矩形 = Rect::from_center_size(右中心, vec2(边长, 边长));
-        if 右矩形.contains(点) {
-            return self.方向触发(方向::右);
-        }
-
-        // 上下方向（隐形，仅检测）
-        if self.当前格矩形().contains(点) {
-            return Overlay事件结果::无;
-        }
-
-        for (方向, (dx, dy)) in &[
-            (方向::上, (0, -1)),
-            (方向::下, (0, 1)),
-        ] {
-            let 邻中心 = self.当前中心 + vec2(*dx as f32 * 步长, *dy as f32 * 步长);
-            let 邻矩形 = Rect::from_center_size(邻中心, vec2(边长, 边长));
-            if 邻矩形.contains(点) {
-                return self.方向触发(*方向);
-            }
-        }
-
-        Overlay事件结果::无
-    }
-
-    fn 方向触发(&mut self, 方向: 方向) -> Overlay事件结果 {
-        let 步长 = 格步长;
-
-        let (dx, dy) = match 方向 {
-            方向::左 => (-1, 0),
-            方向::右 => (1, 0),
-            方向::上 => (0, -1),
-            方向::下 => (0, 1),
-            _ => return Overlay事件结果::无,
-        };
-        self.当前坐标 = (self.当前坐标.0 + dx, self.当前坐标.1 + dy);
-        self.当前中心 = self.当前中心 + vec2(dx as f32 * 步长, dy as f32 * 步长);
-
-        let 新三格坐标: Vec<(i32, i32)> = vec![
-            (self.当前坐标.0 - 1, self.当前坐标.1),
-            self.当前坐标,
-            (self.当前坐标.0 + 1, self.当前坐标.1),
-        ];
-
-        for 格 in &mut self.格子们 {
-            if 新三格坐标.contains(&格.世界坐标) {
-                let x_offset = 格.世界坐标.0 - self.当前坐标.0;
-                格.目标中心 = self.当前中心 + vec2(x_offset as f32 * 步长, 0.0);
-                if 格.世界坐标 == self.当前坐标 {
-                    格.颜色进度 = 1.0;
-                    格.目标不透明度 = 1.0;
-                }
-            } else {
-                格.目标不透明度 = 0.0;
-            }
-        }
-
-        for 坐标 in &新三格坐标 {
-            if !self.格子们.iter().any(|格| 格.世界坐标 == *坐标) {
-                let x_offset = 坐标.0 - self.当前坐标.0;
-                let 目标 = self.当前中心 + vec2(x_offset as f32 * 步长, 0.0);
-                self.格子们.push(格动画 {
-                    世界坐标: *坐标,
-                    中心: 目标,
-                    目标中心: 目标,
-                    颜色进度: 0.0,
-                    不透明度: 0.0,
-                    目标不透明度: if x_offset == 0 { 1.0 } else { 0.55 },
-                });
-            }
-        }
-
-        self.动作预览.应用方向(方向);
-        self.已触发手势 = true;
-        Overlay事件结果::方向(方向)
-    }
-    fn 关闭(&mut self) -> Option<Pos2> {
-        let 补发位置 = if self.已触发手势 {
-            None
-        } else {
-            self.锚点
-        };
-        self.显示 = false;
-        self.锚点 = None;
-        self.当前坐标 = (0, 0);
-        self.格子们.clear();
-        self.动作预览.重置();
-        self.已触发手势 = false;
-        self.清除冻结层();
-        self.需要重定位 = true;
-        补发位置
-    }
-}
-
-// ── 工具函数 ──
 
 pub(crate) fn 平滑逼近(当前: f32, 目标: f32, 帧间隔: f32, 速度: f32) -> f32 {
     if 帧间隔 <= 0.0 {
@@ -338,83 +296,32 @@ pub(crate) fn 平滑逼近(当前: f32, 目标: f32, 帧间隔: f32, 速度: f32
     当前 + (目标 - 当前) * 系数
 }
 
-// ── 测试 ──
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
-    fn 按右键(状态: &mut Overlay状态, x: i32, y: i32) -> Overlay事件结果 {
-        状态.处理原始事件(原始鼠标事件::右键按下 { x, y })
-    }
-
-    fn 移动(状态: &mut Overlay状态, x: i32, y: i32) -> Overlay事件结果 {
-        状态.处理原始事件(原始鼠标事件::鼠标移动 { x, y })
+    fn 会话标志() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
     }
 
     #[test]
-    fn 右键创建三格() {
-        let mut 状态 = Overlay状态::默认();
-        按右键(&mut 状态, 200, 200);
+    fn 右键创建九格() {
+        let mut 状态 = Overlay状态::默认(会话标志());
+        状态.处理原始事件(crate::input::原始鼠标事件::右键按下 { x: 200, y: 200 });
         assert!(状态.显示);
-        assert_eq!(状态.格子们.len(), 3);
-        // 中格不透明度 1.0，左右格 0.55
-        let 中格 = 状态.格子们.iter().find(|格| 格.世界坐标 == (0, 0)).unwrap();
-        assert_eq!(中格.不透明度, 1.0);
-        let 左格 = 状态.格子们.iter().find(|格| 格.世界坐标 == (-1, 0)).unwrap();
-        assert_eq!(左格.不透明度, 0.55);
+        assert_eq!(状态.格子们.len(), 9);
     }
 
     #[test]
-    fn 右移触发方向() {
-        let mut 状态 = Overlay状态::默认();
-        按右键(&mut 状态, 200, 200);
-        let 结果 = 移动(&mut 状态, 306, 200); // 右邻格中心
-        assert!(matches!(结果, Overlay事件结果::方向(方向::右)));
-        assert_eq!(状态.当前坐标, (1, 0));
-    }
-
-    #[test]
-    fn 右移后中格激活色() {
-        let mut 状态 = Overlay状态::默认();
-        按右键(&mut 状态, 200, 200);
-        移动(&mut 状态, 306, 200);
-        let 中格 = 状态.格子们.iter().find(|格| 格.世界坐标 == (1, 0)).unwrap();
-        assert!(中格.颜色进度 > 0.99);
-    }
-
-    #[test]
-    fn 颜色进度随时间衰减() {
-        let mut 状态 = Overlay状态::默认();
-        按右键(&mut 状态, 200, 200);
-        移动(&mut 状态, 306, 200);
-        for _ in 0..90 {
-            状态.推进动画(0.0, 0.016);
-        }
-        let 中格 = 状态.格子们.iter().find(|格| 格.世界坐标 == (1, 0)).unwrap();
-        assert!(中格.颜色进度 < 0.3);
-    }
-
-    #[test]
-    fn 未触发手势结束补发() {
-        let mut 状态 = Overlay状态::默认();
-        按右键(&mut 状态, 10, 20);
-        let 结果 = 状态.处理原始事件(原始鼠标事件::右键抬起 { x: 10, y: 20 });
-        assert!(matches!(
-            结果,
-            Overlay事件结果::会话结束 { 补发位置: Some(_) }
-        ));
-    }
-
-    #[test]
-    fn 已触发手势结束不补发() {
-        let mut 状态 = Overlay状态::默认();
-        按右键(&mut 状态, 200, 200);
-        移动(&mut 状态, 306, 200);
-        let 结果 = 状态.处理原始事件(原始鼠标事件::右键抬起 { x: 306, y: 200 });
-        assert!(matches!(
-            结果,
-            Overlay事件结果::会话结束 { 补发位置: None }
-        ));
+    fn 进入右格转发() {
+        let mut 状态 = Overlay状态::默认(会话标志());
+        状态.处理原始事件(crate::input::原始鼠标事件::右键按下 { x: 200, y: 200 });
+        let 右中心 = 槽位中心(pos2(200.0, 200.0), 宫格槽::右);
+        let 结果 = 状态.处理原始事件(crate::input::原始鼠标事件::鼠标移动 {
+            x: 右中心.x as i32,
+            y: 右中心.y as i32,
+        });
+        assert!(matches!(结果, Overlay事件结果::转发(宫格事件::进入 { .. })));
     }
 }
